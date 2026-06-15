@@ -343,6 +343,32 @@ function buildSupport(
   };
 
   // Tips are pre-sorted tallest-first by the parser; primary = first.
+  // A support may have NO model tips: it is a grounded pillar that exists only to
+  // host braces / pillar-to-pillar links (which never touch the model). Emit it as
+  // a contactless trunk — shaft from root up to the knot, no contact cone — so the
+  // braces have a real shaft to attach to. Without this the pillar would be dropped
+  // and its braces orphaned.
+  const hasModelTip = s.tips.length > 0;
+
+  if (!hasModelTip) {
+    const soloSegment: Segment = {
+      id: generateUuid(),
+      type: 'straight',
+      diameter: shaftDiameter,
+      bottomJoint: undefined, // on Root
+      topJoint: knotJoint,
+    };
+    const trunk: Trunk = {
+      id: generateUuid(),
+      modelId,
+      rootId,
+      baseDiameterMm: shaftDiameter,
+      segments: [soloSegment],
+      contactCone: undefined,
+    };
+    return { root, trunk, knots: [], branches: [] };
+  }
+
   const [primaryTip, ...extraTips] = s.tips;
   const attachPos: Vec3 = { x: px, y: py, z: knotCenter };
 

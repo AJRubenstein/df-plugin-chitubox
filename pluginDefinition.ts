@@ -43,7 +43,7 @@ const PLUGIN_DEFINITION: ComplexPluginDefinition = {
       isSceneFile: true,
       importWarning: {
         title: 'Chitubox Import',
-        body: 'Chitubox import converts Chitubox project data into DragonFruit format. Support placement may differ from the original scene.',
+        body: 'Chitubox import converts Chitubox project data into DragonFruit format. Support placement may differ from the original scene, and plate position/orientation are not recovered.',
         storageKey: 'dragonfruit.chituboxImportWarningDismissed',
       },
     },

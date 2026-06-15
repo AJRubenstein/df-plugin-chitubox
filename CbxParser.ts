@@ -38,6 +38,10 @@ const TIP_SUB = 1; // contact branch to the model (a support may have several)
 const KNOT_SUB = 9; // spherical joint atop the pillar
 const PILLAR_SUB = 3; // vertical shaft (NOT a tip — this was the core bug)
 const BASE_SUB = 4; // wide base pad cone (only on larger supports)
+const FOOT_SUB = 5; // wide flat ground-contact disk; its bottom marks the plate.
+                    // One sits under each support (sometimes clustered into what
+                    // looks like a "platform"). The disk bottom is always exactly
+                    // at the plate, so it is the authoritative ground anchor.
 const MODEL_HDR_SUB = 2; // skip
 const SUMMARY_SUB = 6; // skip (was previously NOT skipped — bug)
 
@@ -195,17 +199,66 @@ function parseSupportBlock(
   const pillars = recs.filter((r) => r.sub === PILLAR_SUB && !isBrace(r));
   const knots = recs.filter((r) => r.sub === KNOT_SUB);
   const bases = recs.filter((r) => r.sub === BASE_SUB);
-  const tips = recs.filter((r) => r.sub === TIP_SUB);
+  const feet = recs.filter((r) => r.sub === FOOT_SUB);
 
-  const braces: CbxBrace[] = braceRecs.map((r) => ({
-    ax: r.x,
-    ay: r.y,
-    az: r.topZ,
-    bx: r.x2,
-    by: r.y2,
-    bz: r.botZ,
-    diameter: r.paramA * 2,
-  }));
+  // Which pillar (index into `pillars`) an XY lands on, or -1. Pillar XY is the
+  // shaft centre; a tolerance catches authored rounding.
+  const PILLAR_HIT_TOL_MM = 0.4;
+  const pillarIndexAt = (x: number, y: number): number => {
+    for (let i = 0; i < pillars.length; i++) {
+      if (Math.hypot(x - pillars[i].x, y - pillars[i].y) <= PILLAR_HIT_TOL_MM) return i;
+    }
+    return -1;
+  };
+
+  // Does a point attach to pillar p's SHAFT — i.e. on its XY and at/below its top
+  // (within the shaft span), not above the top reaching up to the model?
+  const TOP_MARGIN_MM = 0.5;
+  const onPillarShaft = (pi: number, z: number): boolean => {
+    if (pi < 0) return false;
+    const p = pillars[pi];
+    const top = Math.max(p.topZ, p.botZ);
+    return z <= top + TOP_MARGIN_MM;
+  };
+
+  // A sub-1 record is normally a model-contact TIP: one end touches the model, the
+  // other attaches to its pillar. But some sub-1 records have BOTH endpoints on the
+  // SHAFTS of two DIFFERENT pillars — they never reach the model; they are tapered
+  // pillar-to-pillar struts. By the support taxonomy those are BRACES
+  // ("support-to-support, never touches the model"), not tips. Treated as tips they
+  // force a model-contact cone that shoots through the pillar toward the model.
+  //
+  // The Z test is essential: a tip whose contact end shares a pillar's XY but sits
+  // ABOVE that pillar's top is passing the pillar to reach the model — a genuine
+  // tip, not a link. Only when BOTH ends land on the pillar shaft (at/below the
+  // top) is it a true pillar-to-pillar brace.
+  const tipIsPillarLink = (r: RawRecord): boolean => {
+    const pi1 = pillarIndexAt(r.x, r.y);
+    const pi2 = pillarIndexAt(r.x2, r.y2);
+    if (pi1 === -1 || pi2 === -1 || pi1 === pi2) return false;
+    return onPillarShaft(pi1, r.topZ) && onPillarShaft(pi2, r.botZ);
+  };
+
+  const allTipRecs = recs.filter((r) => r.sub === TIP_SUB);
+  const tips = allTipRecs.filter((r) => !tipIsPillarLink(r));
+  const tipBraceRecs = allTipRecs.filter(tipIsPillarLink);
+
+  const braces: CbxBrace[] = [
+    // sub-3 braces: paramA is the shaft radius (paramA ≈ paramB).
+    ...braceRecs.map((r) => ({
+      ax: r.x, ay: r.y, az: r.topZ,
+      bx: r.x2, by: r.y2, bz: r.botZ,
+      diameter: r.paramA * 2,
+    })),
+    // sub-1 pillar-link braces: paramA is the POINTED contact end (~0.16) and
+    // paramB the body (~0.50). Use the body radius so the strut has the right
+    // thickness rather than rendering as a thin spike.
+    ...tipBraceRecs.map((r) => ({
+      ax: r.x, ay: r.y, az: r.topZ,
+      bx: r.x2, by: r.y2, bz: r.botZ,
+      diameter: Math.max(r.paramA, r.paramB) * 2,
+    })),
+  ];
 
   const near = (a: number, b: number, t = 0.05) => Math.abs(a - b) < t;
   const xyNear = (r1: RawRecord, r2: RawRecord, t = 0.06) =>
@@ -248,63 +301,147 @@ function parseSupportBlock(
     if (best) best.tips.push(t);
   }
 
+  // Ground supports to their sub-5 foot (option c). Each support sits on a wide
+  // flat sub-5 disk whose bottom is exactly the plate; sometimes several feet
+  // cluster into what looks like a raised "platform". We do NOT render the feet
+  // (or the platform they form) — instead we ground each support to its own foot
+  // bottom: lower the base pad to the foot bottom (the plate) and extend the
+  // pillar down to meet it, leaving the knot/tips/pillar-top untouched so model
+  // contact is unchanged. This is the principled form of the old height heuristic:
+  // sub-5 is the authoritative ground anchor, so a support raised onto a platform
+  // is grounded by however much its foot is tall — no magic threshold, and bare
+  // mid-air pillars (no foot beneath them) are correctly left alone.
+  const FOOT_MATCH_TOL_MM = 1.0; // a support owns the foot within this XY radius
+  const footBottomFor = (px: number, py: number): number | null => {
+    let best: number | null = null;
+    let bestD = Infinity;
+    for (const f of feet) {
+      const d = Math.hypot(f.x - px, f.y - py);
+      if (d < bestD && d <= FOOT_MATCH_TOL_MM) {
+        bestD = d;
+        best = Math.min(f.topZ, f.botZ);
+      }
+    }
+    return best;
+  };
+
+  // Pillar XYs that a brace endpoint lands on. A tipless pillar referenced by a
+  // brace is part of the support lattice (a grounded pillar hosting braces/links),
+  // not a throwaway interior strut, so it must be kept and emitted as a contactless
+  // trunk for those braces to attach to.
+  const bracedPillarXY: Array<{ x: number; y: number }> = [];
+  for (const br of braces) {
+    bracedPillarXY.push({ x: br.ax, y: br.ay }, { x: br.bx, y: br.by });
+  }
+  const isBracedPillar = (px: number, py: number): boolean =>
+    bracedPillarXY.some((p) => Math.hypot(p.x - px, p.y - py) <= 0.4);
+
   // Materialize into CbxSupport records.
   const supports: CbxSupport[] = [];
   let tiplessPillars = 0;
+  let contactlessPillars = 0;
+  let groundedToFoot = 0;
+
   for (const c of chains) {
-    if (c.tips.length === 0) {
-      // A pillar with no resolvable tip is not an editable contact support: it is
-      // an interior lattice / branch strut that ties into other supports rather
-      // than touching the model. Skip it (no contact-less trunk) and count it —
-      // we summarise once per instance below instead of spamming one line each.
+    if (c.tips.length === 0 && !isBracedPillar(c.pillar.x, c.pillar.y)) {
+      // A tipless pillar with no brace attached is an interior lattice strut that
+      // neither touches the model nor anchors a brace. Skip it (counted, summarised
+      // once per instance below).
       tiplessPillars++;
       continue;
     }
+    if (c.tips.length === 0) {
+      // Tipless but brace-referenced: a grounded pillar that hosts braces/links.
+      // Keep it; buildSupport emits a contactless trunk (no contact cone).
+      contactlessPillars++;
+    } else {
+      // Sort tips tallest-first for deterministic primary-tip selection.
+      c.tips.sort((a, b) => b.topZ - a.topZ);
+    }
 
-    // Sort tips tallest-first for deterministic primary-tip selection.
-    c.tips.sort((a, b) => b.topZ - a.topZ);
+    // Ground to the support's sub-5 foot bottom, if it has one sitting below it.
+    // Lower the base pad (preserving its cone height) to the foot bottom and
+    // extend the pillar down to the lowered base top. Only act when the foot is
+    // actually below the current support bottom (i.e. there is a gap to close).
+    let baseTopZ = c.base ? c.base.topZ : null;
+    let baseBottomZ = c.base ? c.base.botZ : null;
+    let pillarBottomZ = c.pillar.botZ;
+    const footBottom = footBottomFor(c.pillar.x, c.pillar.y);
+    if (footBottom !== null) {
+      const currentBottom = c.base ? c.base.botZ : c.pillar.botZ;
+      if (currentBottom - footBottom > 0.05) {
+        if (c.base && baseBottomZ !== null && baseTopZ !== null) {
+          const coneHeight = baseTopZ - baseBottomZ;
+          baseBottomZ = footBottom;
+          baseTopZ = footBottom + coneHeight;
+          pillarBottomZ = baseTopZ;
+        } else {
+          // No base pad: extend the pillar straight down to the foot bottom.
+          pillarBottomZ = footBottom;
+        }
+        groundedToFoot++;
+      }
+    }
 
     const support: CbxSupport = {
       // Pillar / shaft.
       pillarDiameter: c.pillar.paramA * 2, // authored shaft diameter (e.g. 1.30)
       pillarTopZ: c.pillar.topZ,
-      pillarBottomZ: c.pillar.botZ,
+      pillarBottomZ,
       pillarX: c.pillar.x,
       pillarY: c.pillar.y,
       // Knot (spherical joint atop the pillar).
       knotCenterZ: c.knotCenter,
       knotDiameter: c.knot ? c.knot.topZ - c.knot.botZ : c.pillar.paramA * 2,
-      // Base pad (optional wide root).
+      // Base pad (optional wide root), grounded to the sub-5 foot bottom.
       base: c.base
         ? {
             topRadius: c.base.paramA,
             bottomRadius: c.base.paramB,
-            topZ: c.base.topZ,
-            bottomZ: c.base.botZ,
+            topZ: baseTopZ as number,
+            bottomZ: baseBottomZ as number,
           }
         : null,
       // Tips (one or more contact branches).
-      tips: c.tips.map((t) => ({
-        x: t.x,
-        y: t.y,
-        contactZ: t.topZ,
-        attachZ: t.botZ, // where the tip meets the knot
-        length: t.topZ - t.botZ, // authored cone length
-        contactDiameter: t.paramA * 2, // small end on the model
-        bodyDiameter: t.paramB * 2, // larger socket end
-        contactDepth: t.extra, // penetration into the model
-      })),
+      tips: c.tips.map((t) => {
+        // The authored cone length is the full 3D distance from the tip's pillar
+        // attach point (P2) to its model contact point (P1) — NOT the Z difference
+        // alone. Most tips here are SLANTED (P1 and P2 differ in XY), so the Z gap
+        // (contactZ − attachZ) badly understates the true cone length: e.g. a tip
+        // rising 1.2mm over 3.29mm of XY is 3.50mm long, not 1.20mm. Passing the
+        // Z-only value made createContactAssembly treat the slant as mostly shaft
+        // with a stubby 1.2mm cone, so the contact rendered at the wrong angle and
+        // the cone ended partway instead of spanning pillar→model like Chitubox.
+        const dx = t.x - t.x2;
+        const dy = t.y - t.y2;
+        const dz = t.topZ - t.botZ;
+        const slantLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        return {
+          x: t.x,
+          y: t.y,
+          contactZ: t.topZ,
+          attachZ: t.botZ, // where the tip meets the knot
+          length: slantLength, // authored cone length (true 3D slant distance)
+          contactDiameter: t.paramA * 2, // small end on the model
+          bodyDiameter: t.paramB * 2, // larger socket end
+          contactDepth: t.extra, // penetration into the model
+        };
+      }),
     };
 
     supports.push(support);
   }
 
-  if (tiplessPillars > 0 || braces.length > 0) {
-    // One concise line. Tipless pillars are interior lattice struts; braces are
-    // the diagonal shaft-to-shaft struts now routed to their own output.
+  if (tiplessPillars > 0 || braces.length > 0 || groundedToFoot > 0 || contactlessPillars > 0) {
+    // One concise line. Tipless pillars are interior lattice struts (skipped);
+    // contactless pillars are grounded brace-hosts kept without a contact cone;
+    // braces are shaft-to-shaft struts; grounded are supports lowered onto their
+    // sub-5 foot bottom (the foot/platform geometry itself is not reproduced).
     console.debug(
       `${LOG_PREFIX} instance ${modelIdx}: ${supports.length} editable supports, `
-      + `${braces.length} braces, ${tiplessPillars} interior strut pillar(s) skipped.`,
+      + `${braces.length} braces, ${tiplessPillars} interior strut pillar(s) skipped, `
+      + `${contactlessPillars} contactless brace-host pillar(s), `
+      + `${groundedToFoot} support(s) grounded to sub-5 foot.`,
     );
   }
 

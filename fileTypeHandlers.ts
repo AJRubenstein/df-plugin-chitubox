@@ -36,8 +36,15 @@ import { generateUuid } from '@/utils/uuid';
  * Shape matches the LYS import payload so the host scene manager can consume
  * both via the same code path.
  */
-export type ChituboxImportPayload = {
+export type CbxImportPayload = {
   modelId: string;
+  /**
+   * Display name for this model, derived from the per-model filename stored in
+   * the .chitubox container (extension stripped). The host scene manager uses
+   * this to label the imported object; without it the host falls back to the
+   * project filename plus a numeric suffix (e.g. "guns (2)").
+   */
+  name: string;
   geometry: THREE.BufferGeometry;
   transform: {
     position: THREE.Vector3;
@@ -97,7 +104,7 @@ function summarizeImportSupportData(
 function convertSingleModel(
   model: CbxModelInput,
   settings: ReturnType<typeof createDefaultSettings>,
-): ChituboxImportPayload {
+): CbxImportPayload {
   const importedModelId = generateUuid();
 
   // CbxModelInput.geometry is typed optional; the parser always supplies
@@ -152,35 +159,38 @@ function convertSingleModel(
   const plateX = model.transform?.plateX ?? 0;
   const plateY = model.transform?.plateY ?? 0;
 
+  // raftZ is the support cluster's plate offset (0 when there are no supports).
+  const raftZ = computeRaftZ(model.supports ?? []);
+
+  // Model lift. Chitubox stores the model's intended bottom height above the plate
+  // in the per-instance liftZ field: supported models get liftZ = raft gap (e.g.
+  // 5mm), and support-less models get liftZ = 0 (flat on the bed). The host centers
+  // the geometry's bbox at z=0 then applies this lift, so to land the model bottom
+  // at liftZ we add half the model height:
+  //
+  //   modelLiftZ = liftZ + halfHeight   →   model bottom = liftZ
+  //
+  // For SUPPORTED models this is identical to the old "bboxCenterZ - raftZ" form
+  // (because rawBottom - raftZ == liftZ for every supported instance), so the model
+  // stays locked to its supports. For SUPPORT-LESS models the old form leaked the
+  // geometry's raw authored Z (leaving them floating 4–26mm off the plate); using
+  // liftZ instead grounds them flat on the bed, matching Chitubox.
+  const liftZ = model.transform?.liftZ ?? 0;
+  let halfHeight = 0;
+  if (geometry.getAttribute('position')?.count) {
+    geometry.computeBoundingBox();
+    const box = geometry.boundingBox;
+    if (box) halfHeight = (box.max.z - box.min.z) / 2;
+  }
+  modelLiftZ = liftZ + halfHeight;
+
   if (dragonfruitData) {
-    const raftZ = computeRaftZ(model.supports ?? []);
     CbxConverter.applyZShift(dragonfruitData, -raftZ);
     // Move the support cluster from model-local XY onto its plate position.
     CbxConverter.applyXYShift(dragonfruitData, plateX, plateY);
     // The supports now sit correctly: roots on the plate (z=0), cones up at the
-    // model surface. The model must land in the SAME shifted frame so the two stay
-    // locked — pulling the model in the host then drags its supports with it.
-    //
-    // The host centers the geometry's bounding box at z=0 (it ignores world vertex
-    // Z) and then applies transform.position.z as a lift. To restore the geometry
-    // to the height its supports expect, the lift is the geometry's world-frame
-    // bbox CENTER shifted by the same -raftZ the supports received:
-    //
-    //   transform.z = bboxCenterZ - raftZ
-    //
-    // After the host re-centers (center -> 0) and lifts, the geometry returns to
-    // (worldZ - raftZ), exactly the supports' frame. The previous formula
-    // (lowestConeZ + halfHeight) instead pinned the model's BOTTOM to the lowest
-    // cone, which is wrong whenever a support contacts the model partway up its
-    // height (e.g. an overhang) — it floated the model up by the distance between
-    // the model's bottom and the contact point, and decoupled it from the supports.
-    let bboxCenterZ = 0;
-    if (geometry.getAttribute('position')?.count) {
-      geometry.computeBoundingBox();
-      const box = geometry.boundingBox;
-      if (box) bboxCenterZ = (box.max.z + box.min.z) / 2;
-    }
-    modelLiftZ = bboxCenterZ - raftZ;
+    // model surface; the model lift above keeps geometry and supports in one frame
+    // so pulling the model in the host drags its supports with it.
   }
 
   // Plate XY for the MODEL transform. The host centers the geometry's bbox at
@@ -212,10 +222,23 @@ function convertSingleModel(
 
   return {
     modelId: importedModelId,
+    name: deriveModelName(model.filename, model.index),
     geometry,
     transform,
     supportData: dragonfruitData,
   };
+}
+
+/**
+ * Build a display name for an imported model from its container filename.
+ * Strips a trailing 3D-model extension (.stl/.obj/.ply/.3mf) so the host shows
+ * "Turret_Ammo_Hollowed" rather than "Turret_Ammo_Hollowed.stl". Falls back to
+ * an indexed generic name when the container has no filename for this instance.
+ */
+function deriveModelName(filename: string | null | undefined, index: number): string {
+  const raw = (filename ?? '').trim();
+  if (!raw) return `model_${index + 1}`;
+  return raw.replace(/\.(stl|obj|ply|3mf)$/i, '');
 }
 
 // ---------------------------------------------------------------------------
@@ -224,7 +247,7 @@ function convertSingleModel(
 
 export async function importCbxFile(
   file: File,
-): Promise<ChituboxImportPayload | ChituboxImportPayload[]> {
+): Promise<CbxImportPayload | CbxImportPayload[]> {
   console.log('[chitubox-import] Starting Cbx import...');
   const parsed = await CbxParser.parse(file);
 
@@ -243,6 +266,7 @@ export async function importCbxFile(
     // Best-effort empty payload so the importer can surface a clean state.
     return {
       modelId: generateUuid(),
+      name: 'model_1',
       geometry: new THREE.BufferGeometry(),
       transform: {
         position: new THREE.Vector3(0, 0, 0),
