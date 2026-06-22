@@ -5,6 +5,7 @@ import { CbxParser } from './CbxParser';
 import { CbxConverter, computeRaftZ, type CbxModelInput } from './CbxConverter';
 import { createDefaultSettings } from '@/supports/Settings/types';
 import { generateUuid } from '@/utils/uuid';
+import { initializeBVH, accelerateGeometry, disposeGeometryBVH } from '@/utils/bvh';
 
 /**
  * File-type import bridge for `.chitubox` project files.
@@ -124,9 +125,22 @@ function convertSingleModel(
   // recover the true surface normal at each contact point (better cone seating
   // on angled faces). Double-sided basic material; matrix world updated; the
   // material is disposed after conversion. Mirrors the LYS ghost-mesh approach.
+  //
+  // The converter raycasts heavily against this mesh (contact assembly, the
+  // penetration self-check, twig surface-normal recovery, the support-to-support
+  // brace classifier). Without a spatial index every ray is an O(triangles) linear
+  // scan, so on a ~500k-triangle model the conversion took >80s. Build a BVH on the
+  // geometry first (the host does the same later in its own pipeline) so accelerated
+  // raycasting makes each ray O(log n) — convert drops from ~85s to well under 1s.
+  // The tree is disposed after convert; the host rebuilds its own during geometry
+  // prep, so leaving ours behind would only duplicate memory.
   let raycastMesh: THREE.Mesh | undefined;
   let ghostMaterial: THREE.Material | undefined;
+  let builtBVH = false;
   if (geometry.getAttribute('position')?.count) {
+    initializeBVH(); // idempotent: patches prototypes if the host hasn't already
+    accelerateGeometry(geometry);
+    builtBVH = true;
     ghostMaterial = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide });
     raycastMesh = new THREE.Mesh(geometry, ghostMaterial);
     raycastMesh.updateMatrixWorld(true);
@@ -138,6 +152,7 @@ function convertSingleModel(
   }
 
   if (ghostMaterial) ghostMaterial.dispose();
+  if (builtBVH) disposeGeometryBVH(geometry);
 
   // --- Placement: keep the authored world frame, seat roots on the plate ------
   //
@@ -165,24 +180,40 @@ function convertSingleModel(
   // Model lift. Chitubox stores the model's intended bottom height above the plate
   // in the per-instance liftZ field: supported models get liftZ = raft gap (e.g.
   // 5mm), and support-less models get liftZ = 0 (flat on the bed). The host centers
-  // the geometry's bbox at z=0 then applies this lift, so to land the model bottom
-  // at liftZ we add half the model height:
+  // the geometry's bbox at z=0 then applies this lift, so the model bottom lands at
+  // (modelLiftZ - halfHeight).
   //
-  //   modelLiftZ = liftZ + halfHeight   →   model bottom = liftZ
+  // The supports are shifted by -raftZ (their lowest point → plate z=0). To keep
+  // the model LOCKED to its supports, the model must shift by the SAME -raftZ, so
+  // its bottom lands at (rawBottom - raftZ) — the actual authored gap between the
+  // model bottom and the support roots:
   //
-  // For SUPPORTED models this is identical to the old "bboxCenterZ - raftZ" form
-  // (because rawBottom - raftZ == liftZ for every supported instance), so the model
-  // stays locked to its supports. For SUPPORT-LESS models the old form leaked the
-  // geometry's raw authored Z (leaving them floating 4–26mm off the plate); using
-  // liftZ instead grounds them flat on the bed, matching Chitubox.
+  //   modelLiftZ = (rawBottom - raftZ) + halfHeight   →   model bottom = rawBottom - raftZ
+  //
+  // The earlier form used the nominal liftZ field instead, which only equals the
+  // real gap when raftZ == 0 (the lowest support already sits at the plate). When
+  // the support cluster's lowest point is authored above the plate (raftZ > 0, e.g.
+  // base pads/feet raise it), liftZ overstates the gap and the model floats ~1mm
+  // above the tips, so every tip falls short by exactly liftZ - (rawBottom - raftZ).
+  // Using (rawBottom - raftZ) is a no-op where raftZ == 0 (e.g. BIG_GAT) and closes
+  // the gap everywhere else (e.g. SPOTLIGHT, the halfling).
+  //
+  // SUPPORT-LESS models have no roots to lock to, so there's no authored gap to
+  // follow; fall back to liftZ (0 → flat on the bed), matching Chitubox.
   const liftZ = model.transform?.liftZ ?? 0;
+  const hasSupports = (model.supports?.length ?? 0) > 0;
   let halfHeight = 0;
+  let rawBottom = 0;
   if (geometry.getAttribute('position')?.count) {
     geometry.computeBoundingBox();
     const box = geometry.boundingBox;
-    if (box) halfHeight = (box.max.z - box.min.z) / 2;
+    if (box) {
+      halfHeight = (box.max.z - box.min.z) / 2;
+      rawBottom = box.min.z;
+    }
   }
-  modelLiftZ = liftZ + halfHeight;
+  // Supported: lock to the roots via the real authored gap. Support-less: use liftZ.
+  modelLiftZ = (hasSupports ? (rawBottom - raftZ) : liftZ) + halfHeight;
 
   if (dragonfruitData) {
     CbxConverter.applyZShift(dragonfruitData, -raftZ);

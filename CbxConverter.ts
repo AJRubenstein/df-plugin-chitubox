@@ -7,11 +7,17 @@ import {
   Brace,
   Knot,
   Joint,
+  Leaf,
   Segment,
   Vec3,
+  Twig,
+  ContactDisk,
 } from '@/supports/types';
 import { SupportSettings } from '@/supports/Settings';
 import { getJointDiameter } from '@/supports/constants';
+import { calculateDiskThickness } from '@/supports/SupportPrimitives/ContactDisk/contactDiskUtils';
+import { recomputeLeafContactConeAxisAndLength } from '@/supports/state';
+import { ContactCone } from '@/supports/SupportPrimitives/ContactCone/types';
 import { createContactAssembly } from './converter/contactAssembly';
 import { generateUuid } from '@/utils/uuid';
 
@@ -51,163 +57,35 @@ import { generateUuid } from '@/utils/uuid';
  * is a placeholder; the host reassigns it via reassignModelId() after conversion.
  */
 
-const LOG_PREFIX = '[CbxConverter]';
-
-/**
- * Fallback support-tip defaults handed to createContactAssembly when a value
- * isn't authored in the Cbx record. Field set matches what the assembly
- * helper reads (lengthMm, bodyDiameterMm, contactDiameterMm, diskThicknessMm,
- * maxStandoffMm, standoffAngleThreshold, penetrationMm). Values mirror
- * DEFAULT_TIP_PROFILE so cone proportions stay consistent with native authoring.
- *
- * If the host's live `settings.tip` is passed into convert(), those values are
- * used instead (see resolveTipDefaults).
- */
-const CBX_TIP_DEFAULTS = {
-  lengthMm: 3.0,
-  bodyDiameterMm: 1.2,
-  contactDiameterMm: 0.4,
-  diskThicknessMm: 0.1,
-  maxStandoffMm: 0.25,
-  standoffAngleThreshold: Math.PI / 4,
-  penetrationMm: 0.05,
-};
-
-/**
- * Fallback root/shaft defaults. Root pad diameter and disk/cone heights follow
- * convertLysData, which sources them from settings.roots rather than from the
- * source file. Cbx's skate radius is intentionally NOT used as the pad
- * diameter, matching LYS behaviour (the plate footprint is a DragonFruit
- * setting, not authored geometry).
- */
-const CBX_ROOT_DEFAULTS = {
-  diameterMm: 3.0,
-  diskHeightMm: 0.5,
-  coneHeightMm: 1.0,
-};
-
-const CBX_SHAFT_DEFAULTS = {
-  diameterMm: 0.7,
-};
-
-// Max XY distance (mm) from a brace endpoint to a pillar shaft for attachment.
-// Brace endpoints sit on pillar centres (verified within ~0.5mm); 1.0mm gives a
-// small safety margin without risking a wrong-shaft match in dense layouts.
-const CBX_BRACE_ATTACH_TOL_MM = 1.0;
-
-/**
- * A single contact branch (tip) of a support. A support may have several
- * (branched supports share one pillar/knot but reach multiple contact points).
- */
-export interface CbxTip {
-  /** Contact point on the model surface (world space). */
-  x: number;
-  y: number;
-  contactZ: number;
-  /** Z where the tip meets the knot (bottom of the cone). */
-  attachZ: number;
-  /** Authored cone length, mm (= contactZ − attachZ). */
-  length: number;
-  /** Small contact end (touches model) and larger body/socket end, mm. */
-  contactDiameter: number;
-  bodyDiameter: number;
-  /** Penetration depth into the model, mm. */
-  contactDepth: number;
-}
-
-/**
- * Optional wide base pad (only present on larger supports). Authored as a
- * truncated cone: top/bottom radii and the Z span it occupies (world space).
- */
-export interface CbxBasePad {
-  topRadius: number;
-  bottomRadius: number;
-  topZ: number;
-  bottomZ: number;
-}
-
-/**
- * Parsed support in the CORRECTED chain model (see CbxParser). One support
- * is a vertical chain: [base pad] → pillar → knot → one-or-more tips. All Z
- * values are world frame; diameters are already radius×2.
- */
-export interface CbxSupport {
-  /** Authored pillar (shaft) diameter, mm. */
-  pillarDiameter: number;
-  /** Pillar top/bottom Z (world space). Top meets the knot; bottom the raft. */
-  pillarTopZ: number;
-  pillarBottomZ: number;
-  /** Pillar XY (shared by base + knot). */
-  pillarX: number;
-  pillarY: number;
-  /** Knot (spherical joint) center Z and authored sphere diameter. */
-  knotCenterZ: number;
-  knotDiameter: number;
-  /** Optional wide base pad. */
-  base: CbxBasePad | null;
-  /** One or more contact branches. */
-  tips: CbxTip[];
-}
-
-/**
- * Authored per-instance plate transform, read directly from the `.chitubox`
- * per-instance header table (parser open-coded the sub-offsets):
- *   plateX ← header +660, plateY ← header +664, liftZ ← header +668.
- *
- * This is the data the format report previously called "undecoded": it is now
- * decoded, so multi-model imports can place each model at its authored plate
- * position instead of stacking everything at the origin. The last (anomalous)
- * header entry has no authored transform; the parser fills it with zeros, which
- * the bridge treats as "centre on the plate".
- */
-export interface CbxTransform {
-  /** Plate X translation, mm (header +660). */
-  plateX: number;
-  /** Plate Y translation, mm (header +664). */
-  plateY: number;
-  /** Authored Z-lift, mm (header +668). 0 = flat on plate. */
-  liftZ: number;
-}
-
-/**
- * A brace: a diagonal strut connecting two vertical support shafts (pillars).
- * In the `.chitubox` block it is a sub-3 record whose two endpoints differ in
- * XY (a normal vertical pillar has identical endpoints). Both endpoints land on
- * existing pillar shafts; the converter drops a Knot on each and links them with
- * a DragonFruit Brace. All Z values are world frame; diameter is radius×2.
- */
-export interface CbxBrace {
-  /** Endpoint A (world space). */
-  ax: number;
-  ay: number;
-  az: number;
-  /** Endpoint B (world space). */
-  bx: number;
-  by: number;
-  bz: number;
-  /** Strut diameter, mm. */
-  diameter: number;
-}
-
-/** Per-model bundle handed to the converter (one entry per distinct model). */
-export interface CbxModelInput {
-  index: number;
-  filename: string | null;
-  /** Model mesh, used only for the import meta objectCenter. */
-  geometry?: THREE.BufferGeometry | null;
-  supports: CbxSupport[];
-  /**
-   * Diagonal braces between support shafts. Optional so older callers / fixtures
-   * without braces still type-check; absent means no braces for this model.
-   */
-  braces?: CbxBrace[];
-  /**
-   * Authored per-instance plate transform (plate XY + Z-lift). Optional so older
-   * callers / synthetic fixtures that don't set it still type-check; the bridge
-   * defaults a missing transform to the origin.
-   */
-  transform?: CbxTransform;
-}
+// Shared CBX types, constants, and the debug helper now live in converter/types.
+// Re-exported here so existing importers of CbxConverter keep working unchanged.
+import {
+  LOG_PREFIX,
+  CBX_DEBUG,
+  cbxDebug,
+  CBX_TIP_DEFAULTS,
+  CBX_ROOT_DEFAULTS,
+  CBX_SHAFT_DEFAULTS,
+  CBX_BRACE_ATTACH_TOL_MM,
+  CbxTip,
+  CbxBasePad,
+  CbxSupport,
+  CbxTransform,
+  CbxBrace,
+  CbxTwig,
+  CbxJunctionBranch,
+  CbxModelInput,
+} from './converter/types';
+export type {
+  CbxTip,
+  CbxBasePad,
+  CbxSupport,
+  CbxTransform,
+  CbxBrace,
+  CbxTwig,
+  CbxJunctionBranch,
+  CbxModelInput,
+} from './converter/types';
 
 /**
  * The raft-top height (world frame) for a set of supports: the minimum base/
@@ -218,56 +96,28 @@ export interface CbxModelInput {
  * transform — keeping geometry and supports in the same frame. Returns 0 when
  * there are no supports (nothing to anchor against).
  */
-export function computeRaftZ(supports: CbxSupport[]): number {
-  if (!supports || supports.length === 0) return 0;
-  return Math.min(...supports.map((s) => (s.base ? s.base.bottomZ : s.pillarBottomZ)));
-}
+// computeRaftZ / computeModelLift live in converter/clusterTransform; re-exported
+// here so existing importers of CbxConverter keep working.
+export { computeRaftZ, computeModelLift } from './converter/clusterTransform';
 
-/**
- * The model's authored lift above the plate (world frame), recovered from the
- * supports rather than the geometry: each tip's contact point minus its
- * penetration depth is a point on the model's lower surface, so the minimum of
- * those is the model's lowest supported surface ≈ the model's true bottom.
- *
- * This is contamination-immune (it never touches the mesh) and is what the
- * file-type bridge uses as transform.position.z so the normalized geometry is
- * lifted back to the height its supports expect. Returns 0 if there are no tips.
- */
-export function computeModelLift(model: CbxModelInput): number {
-  const tips = (model.supports ?? []).flatMap((s) => s.tips);
-  if (tips.length === 0) return 0;
-  return Math.min(...tips.map((t) => t.contactZ - t.contactDepth));
-}
-
-/**
- * Build a synthetic LysSupport-shaped object for createContactAssembly.
- * Cbx has no tip normal, so tipNormal is omitted; the helper then takes its
- * geometric socket-solve path (preferLysTipNormal=false).
- */
-function synthSupportForTip(tip: CbxTip, attachPos: Vec3): any {
-  return {
-    id: 'chitubox-synth',
-    base: { x: attachPos.x, y: attachPos.y, z: attachPos.z },
-    tip: { x: tip.x, y: tip.y, z: tip.contactZ },
-    settings: undefined,
-  };
-}
-
-/**
- * tipSettings for createContactAssembly, from AUTHORED tip values.
- *   length        ← authored cone length (contactZ − attachZ). Critical: passing
- *                   the real length prevents the helper's default-3mm fallback
- *                   from placing the socket below the plate on short supports.
- *   pointDiameter ← contactDiameter (small end on the model)
- *   diameter      ← bodyDiameter    (larger socket end)
- */
-function synthTipSettings(tip: CbxTip): any {
-  return {
-    length: Number.isFinite(tip.length) && tip.length > 0 ? tip.length : undefined,
-    diameter: Number.isFinite(tip.bodyDiameter) ? tip.bodyDiameter : undefined,
-    pointDiameter: Number.isFinite(tip.contactDiameter) ? tip.contactDiameter : undefined,
-  };
-}
+/** Normalize a Vec3; returns a unit-Z fallback for a zero-length input. */
+// Geometry helpers extracted to converter/geometryHelpers.
+import {
+  normalizeVec,
+  synthSupportForTip,
+  synthTipSettings,
+  buildTipFromKnot,
+  buildNativeBranch,
+  applyTrunkDiameterProfile,
+  computeLinearTLocal,
+  LEAF_MAX_SHAFT_MM,
+} from './converter/geometryHelpers';
+import {
+  applyZShift as clusterApplyZShift,
+  applyXYShift as clusterApplyXYShift,
+  seatRootsOnPlate as clusterSeatRootsOnPlate,
+} from './converter/clusterTransform';
+import { classifySupportTips, centerCoincidentKnots, collapseDegenerateJoints } from './converter/sanityPasses';
 
 /** Output of converting one support: the entities it contributes. */
 interface BuiltSupport {
@@ -275,6 +125,7 @@ interface BuiltSupport {
   trunk: Trunk;
   knots: Knot[];
   branches: Branch[];
+  leaves: Leaf[];
 }
 
 /**
@@ -311,7 +162,22 @@ function buildSupport(
   // --- Roots: from authored base pad if present, else a settings-sized pad. ---
   const rootId = generateUuid();
   let root: Roots;
-  if (s.base) {
+  if (s.isForkJunction) {
+    // Fork junction: the pillar's base is mid-air at a brace convergence, held up
+    // by the converging struts rather than the plate. It is NOT grounded, so it
+    // must not render a base "cup". Emit a zero-size root at the convergence: the
+    // shaft starts exactly there (the host begins the trunk at root.z + diskHeight
+    // + coneHeight = the convergence) and the braces attaching to this shaft keep
+    // the junction visually connected — but no disk/cone geometry is drawn.
+    root = {
+      id: rootId,
+      modelId,
+      transform: { pos: { x: px, y: py, z: pillarBottom }, rot: { x: 0, y: 0, z: 0, w: 1 } },
+      diameter: 0,
+      diskHeight: 0,
+      coneHeight: 0,
+    };
+  } else if (s.base) {
     const padBottom = z(s.base.bottomZ);
     const padTop = z(s.base.topZ);
     root = {
@@ -366,41 +232,64 @@ function buildSupport(
       segments: [soloSegment],
       contactCone: undefined,
     };
-    return { root, trunk, knots: [], branches: [] };
+    return { root, trunk, knots: [], branches: [], leaves: [] };
   }
 
   const [primaryTip, ...extraTips] = s.tips;
-  const attachPos: Vec3 = { x: px, y: py, z: knotCenter };
+  const isMultiTip = extraTips.length > 0;
+  const rootTopZ = root.transform.pos.z + (root.diskHeight ?? 0) + (root.coneHeight ?? 0);
+  const knotJointDiameter = Number.isFinite(s.knotDiameter) && s.knotDiameter > 0
+    ? s.knotDiameter
+    : getJointDiameter(shaftDiameter);
+  const MIN_BASE_SEG_MM = 1.0;
+  const MIN_TRANSITION_SEG_MM = 0.5;
 
-  // --- Primary tip → trunk terminal cone. ---
+  const knots: Knot[] = [];
+  const branches: Branch[] = [];
+  const leaves: Leaf[] = [];
+
+  // --- Trunk for the PRIMARY tip (same for single- and multi-tip supports). ---
+  // LYS-style trunk: root → joint0 (knee) → socket → contact cone. For multi-tip
+  // supports the extra tips become native Branches off a knot on this trunk's shaft
+  // (built below), each growing up to its own contact — the arrangement DF produces
+  // when you place additional supports off a trunk. The trunk is always a normal,
+  // cone-terminated trunk so the engine recognises it as a properly-formed support.
+  const provisionalKneeZ = Math.max(rootTopZ + 0.05, knotCenter);
+  const provisionalKnee: Vec3 = { x: px, y: py, z: provisionalKneeZ };
   const primary = createContactAssembly(
-    synthSupportForTip(primaryTip, attachPos),
+    synthSupportForTip(primaryTip, provisionalKnee),
     new THREE.Vector3(primaryTip.x, primaryTip.y, z(primaryTip.contactZ)),
-    attachPos,
-    synthTipSettings(primaryTip),
+    provisionalKnee,
+    synthTipSettings(primaryTip, shaftDiameter),
     tipDefaults,
     mesh,
     false, false, null, true,
   );
 
-  // Shaft: root → knot joint (bottomJoint undefined = "on Root"), then knot →
-  // primary socket. Authored diameter throughout.
-  const segments: Segment[] = [
-    {
+  const socketZ = primary.socketJoint.pos.z;
+  const segments: Segment[] = [];
+  if (socketZ - rootTopZ > MIN_BASE_SEG_MM + MIN_TRANSITION_SEG_MM) {
+    const minJointZ = rootTopZ + MIN_BASE_SEG_MM;
+    const maxJointZ = socketZ - MIN_TRANSITION_SEG_MM;
+    const jointZ = Math.max(minJointZ, Math.min(knotCenter, maxJointZ));
+    const joint0: Joint = {
+      id: generateUuid(),
+      pos: { x: px, y: py, z: jointZ },
+      diameter: knotJointDiameter,
+    };
+    segments.push(
+      { id: generateUuid(), type: 'straight', diameter: shaftDiameter, bottomJoint: undefined, topJoint: joint0 },
+      { id: generateUuid(), type: 'straight', diameter: shaftDiameter, bottomJoint: joint0, topJoint: primary.socketJoint },
+    );
+  } else {
+    segments.push({
       id: generateUuid(),
       type: 'straight',
       diameter: shaftDiameter,
-      bottomJoint: undefined,
-      topJoint: knotJoint,
-    },
-    {
-      id: generateUuid(),
-      type: 'straight',
-      diameter: shaftDiameter,
-      bottomJoint: knotJoint,
+      bottomJoint: undefined, // on Root
       topJoint: primary.socketJoint,
-    },
-  ];
+    });
+  }
 
   const trunk: Trunk = {
     id: generateUuid(),
@@ -411,49 +300,58 @@ function buildSupport(
     contactCone: primary.contactCone,
   };
 
-  // --- Extra tips → Knot on the shaft + Branch with its own cone. ---
-  const knots: Knot[] = [];
-  const branches: Branch[] = [];
-  for (const tip of extraTips) {
-    // The branch attaches at the knot joint (top of the pillar), where Cbx
-    // roots all of a support's tips.
-    const knot: Knot = {
+  // --- Extra tips → native Leaves or Branches off a knot on the trunk shaft. ---
+  // Use the LYS leaf-vs-branch decision per tip: shaftLength = dist(knot→contact) −
+  // tipLen. If ≤ 0.2mm there's no room for a shaft → Leaf (cone straight from the
+  // knot). Otherwise → Branch (single segment knot → socket + short native cone).
+  // All extra tips share one knot on the shaft (Chitu roots them at the pillar top).
+  if (extraTips.length > 0) {
+    const topSegment = segments[segments.length - 1];
+    // Place the shared knot at the AUTHORED knot height (knotCenter) — the LYS
+    // "authored attach point" — not the primary cone's socket. Chitubox roots all
+    // tips of a multi-tip support at this shared height; using it lowers the knot to
+    // where the supports actually fan out, so leaves/branches approach their contacts
+    // from below (vertical) instead of meeting the shaft side-on at a right angle.
+    // Clamp to stay on the trunk's top segment (between its bottom joint and socket).
+    const segBotZ = topSegment.bottomJoint?.pos.z ?? rootTopZ;
+    const segTopZ = topSegment.topJoint?.pos.z ?? primary.socketJoint.pos.z;
+    const knotZ = Math.max(segBotZ + 0.05, Math.min(knotCenter, segTopZ - 0.05));
+    const sharedKnotPos: Vec3 = { x: px, y: py, z: knotZ };
+    const sharedKnot: Knot = {
       id: generateUuid(),
-      parentShaftId: segments[1].id, // the knot→primary shaft segment
-      pos: { x: px, y: py, z: knotCenter },
-      diameter: knotJoint.diameter,
+      parentShaftId: topSegment.id,
+      pos: sharedKnotPos,
+      diameter: getJointDiameter(shaftDiameter),
       _importHint: 'preserve',
     };
-    knots.push(knot);
+    knots.push(sharedKnot);
 
-    const branchAssembly = createContactAssembly(
-      synthSupportForTip(tip, attachPos),
-      new THREE.Vector3(tip.x, tip.y, z(tip.contactZ)),
-      attachPos,
-      synthTipSettings(tip),
-      tipDefaults,
-      mesh,
-      false, false, null, true,
-    );
-
-    branches.push({
-      id: generateUuid(),
-      modelId,
-      parentKnotId: knot.id,
-      segments: [
-        {
-          id: generateUuid(),
-          type: 'straight',
-          diameter: shaftDiameter,
-          bottomJoint: undefined, // connects to the parent knot
-          topJoint: branchAssembly.socketJoint,
-        },
-      ],
-      contactCone: branchAssembly.contactCone,
-    });
+    for (const tip of extraTips) {
+      const { leaf, branch } = buildTipFromKnot(
+        tip,
+        sharedKnot,
+        sharedKnotPos,
+        new THREE.Vector3(tip.x, tip.y, z(tip.contactZ)),
+        shaftDiameter,
+        modelId,
+        tipDefaults,
+        mesh,
+      );
+      if (leaf) leaves.push(leaf);
+      if (branch) branches.push(branch);
+    }
   }
 
-  return { root, trunk, knots, branches };
+  // Apply the native trunk diameter profile to EVERY trunk (single- and multi-tip).
+  // For multi-tip it splits the shaft at branch knots and thickens bottom-up. For
+  // single-tip it still does the essential job of sizing the top socket joint to the
+  // SHAFT diameter (not the narrow cone body) — without it the shaft (0.80) necks
+  // down to a cone-body joint (0.60) then the cone (0.50), giving the abrupt
+  // "capped"/collared look. This mirrors the host applying the profile on edit (the
+  // recompute the mousewheel triggers), so the imported trunk renders correctly.
+  applyTrunkDiameterProfile(trunk, rootTopZ, knots, branches);
+
+  return { root, trunk, knots, branches, leaves };
 }
 
 /** Resolve tip defaults from live settings if provided, else module fallback. */
@@ -524,6 +422,7 @@ export class CbxConverter {
     const trunks: Trunk[] = [];
     const knots: Knot[] = [];
     const branches: Branch[] = [];
+    const leaves: Leaf[] = [];
     const braces: Brace[] = [];
 
     // Supports are emitted in the SAME world frame as the model geometry (raw +
@@ -557,8 +456,46 @@ export class CbxConverter {
       segments: SegRef[];
     }
     const shaftRefs: ShaftRef[] = [];
+    // Fork-junction trunks: built as normal trunks so all tip/branch/leaf logic
+    // works, but their base is mid-air (held by converging braces, not the plate).
+    // We record them here and, AFTER braces create the convergence knots, re-anchor
+    // each to a convergence knot and drop its floating root — otherwise the host's
+    // SmartPlacementV2 sees a root off the plate and re-routes it down, spiking
+    // through the model.
+    const forkJunctionTrunks: Array<{ trunk: Trunk; rootId: string; basePos: Vec3 }> = [];
 
-    for (const s of supports) {
+    // Pre-pass: classify each support's tips into model-contact tips vs
+    // support-to-support brace tips (a Chitubox cross-brace lands a tip on a
+    // neighbouring shaft, not the model). Brace tips are collected and emitted as
+    // DragonFruit Braces after the shafts exist; importing them as model cones would
+    // tunnel through the model to reach empty space (the "arch through the foot").
+    const pendingSupportBraces: Array<{
+      sourcePillarX: number; sourcePillarY: number;
+      targetPillarX: number; targetPillarY: number;
+      contact: Vec3; diameter: number;
+    }> = [];
+    const supportsForBuild: CbxSupport[] = supports.map((s) => {
+      const { modelTips, braceTips } = classifySupportTips(s, supports, mesh);
+      for (const bt of braceTips) {
+        pendingSupportBraces.push({
+          sourcePillarX: s.pillarX,
+          sourcePillarY: s.pillarY,
+          targetPillarX: bt.targetPillarX,
+          targetPillarY: bt.targetPillarY,
+          contact: { x: bt.tip.x, y: bt.tip.y, z: bt.tip.contactZ - raftZ },
+          diameter: Number.isFinite(bt.tip.bodyDiameter) && bt.tip.bodyDiameter > 0
+            ? bt.tip.bodyDiameter
+            : shaftDefaults.diameterMm,
+        });
+      }
+      // A support must keep at least one tip to remain a valid support; if every
+      // tip was a brace tip, leave it unchanged (its tips were genuine — the
+      // classifier only diverts tips that clearly miss the model).
+      if (braceTips.length === 0 || modelTips.length === 0) return s;
+      return { ...s, tips: modelTips };
+    });
+
+    for (const s of supportsForBuild) {
       try {
         const built = buildSupport(
           s, placeholderModelId, raftZ, tipDefaults, rootDefaults, shaftDefaults, mesh,
@@ -567,6 +504,15 @@ export class CbxConverter {
         trunks.push(built.trunk);
         knots.push(...built.knots);
         branches.push(...built.branches);
+        leaves.push(...built.leaves);
+
+        if (s.isForkJunction) {
+          forkJunctionTrunks.push({
+            trunk: built.trunk,
+            rootId: built.root.id,
+            basePos: { x: s.pillarX, y: s.pillarY, z: built.root.transform.pos.z },
+          });
+        }
 
         // Reconstruct each segment's world endpoints from its joints, matching how
         // the host's getTrunkSegmentEndpoints derives them:
@@ -586,8 +532,12 @@ export class CbxConverter {
               ? { x: px, y: py, z: rootTopZ }
               : segs[i - 1].topJoint?.pos ?? { x: px, y: py, z: rootTopZ });
           const coneSocket = built.trunk.contactCone?.pos;
+          // For a cone-less (multi-tip) trunk the shaft ends in the terminal knot,
+          // so fall back to that knot's position for the top segment's end.
+          const terminalKnotPos = built.knots.find((k) => k.parentShaftId === seg.id)?.pos;
           const end: Vec3 = seg.topJoint?.pos
             ?? coneSocket
+            ?? terminalKnotPos
             ?? { x: start.x, y: start.y, z: start.z + 10 };
           segRefs.push({ segmentId: seg.id, start, end });
         }
@@ -710,6 +660,509 @@ export class CbxConverter {
       });
     }
 
+    // --- Support-to-support braces (from reclassified tips) ---
+    // Each pending brace connects the SOURCE support's shaft to the TARGET support's
+    // shaft at the authored contact point. We project the contact onto the target
+    // pillar (where the tip landed) and project a source point onto the source pillar,
+    // then link them with a DragonFruit Brace — the same primitive used for authored
+    // sub-3 braces. This replaces a model cone that would otherwise tunnel to the
+    // off-model contact.
+    let supportBracesEmitted = 0;
+    for (const pb of pendingSupportBraces) {
+      const targetShaft = nearestShaft(pb.targetPillarX, pb.targetPillarY);
+      const sourceShaft = nearestShaft(pb.sourcePillarX, pb.sourcePillarY);
+      if (!targetShaft || !sourceShaft || targetShaft === sourceShaft) {
+        continue;
+      }
+      // Target knot: the contact projected onto the target pillar (where it landed).
+      const projTarget = projectToShaft(targetShaft, pb.contact);
+      // Source knot: the same height on the source pillar (so the brace spans across).
+      const sourcePoint: Vec3 = { x: pb.sourcePillarX, y: pb.sourcePillarY, z: pb.contact.z };
+      const projSource = projectToShaft(sourceShaft, sourcePoint);
+      const jointDiameter = getJointDiameter(pb.diameter);
+
+      const knotTarget: Knot = {
+        id: generateUuid(),
+        parentShaftId: projTarget.segmentId,
+        t: projTarget.t,
+        pos: projTarget.pos,
+        diameter: jointDiameter,
+        _importHint: 'braceImported',
+      };
+      const knotSource: Knot = {
+        id: generateUuid(),
+        parentShaftId: projSource.segmentId,
+        t: projSource.t,
+        pos: projSource.pos,
+        diameter: jointDiameter,
+        _importHint: 'braceImported',
+      };
+      knots.push(knotTarget, knotSource);
+      braces.push({
+        id: generateUuid(),
+        modelId: placeholderModelId,
+        startKnotId: knotSource.id,
+        endKnotId: knotTarget.id,
+        profile: { diameter: pb.diameter },
+      });
+      supportBracesEmitted++;
+    }
+    if (pendingSupportBraces.length > 0) {
+      console.log(`${LOG_PREFIX} support-to-support braces`, {
+        pending: pendingSupportBraces.length,
+        emitted: supportBracesEmitted,
+      });
+    }
+
+    // --- Fork-junction re-anchoring ---
+    // A fork-junction trunk's base sits mid-air where braces converge. We built it
+    // as a normal trunk on a zero-size root so its tips/branches/leaves form
+    // correctly, but a root off the plate makes the host's SmartPlacementV2 re-route
+    // the support down to the plate (spiking through the model). Now that the
+    // converging braces have dropped knots at the convergence point, re-anchor each
+    // fork trunk to the nearest convergence knot — its bottom segment becomes parented
+    // to that knot (a branch off the brace network) — and drop the floating root so
+    // the host no longer tries to ground it.
+    let forksReanchored = 0;
+    if (forkJunctionTrunks.length > 0) {
+      const droppedRootIds = new Set<string>();
+      // Knots that a brace attaches to (the convergence knots we want to anchor onto).
+      const braceKnotIds = new Set<string>();
+      for (const br of braces) {
+        if (br.startKnotId) braceKnotIds.add(br.startKnotId);
+        if (br.endKnotId) braceKnotIds.add(br.endKnotId);
+      }
+      for (const fork of forkJunctionTrunks) {
+        // Anchor onto the nearest BRACE-convergence knot at the fork base. We key off
+        // "a brace references this knot" rather than shaft ownership, because the
+        // converging braces drop their knots onto the fork's own base segment — those
+        // are exactly the knots we want, so excluding by shaft would miss them.
+        let best: Knot | null = null;
+        let bestD = Infinity;
+        for (const k of knots) {
+          if (!braceKnotIds.has(k.id)) continue;
+          const d = Math.hypot(k.pos.x - fork.basePos.x, k.pos.y - fork.basePos.y, k.pos.z - fork.basePos.z);
+          if (d < bestD) { bestD = d; best = k; }
+        }
+        // Only re-anchor if a convergence knot is genuinely at the base (within 2mm).
+        if (!best || bestD > 2.0) continue;
+
+        // Re-parent the trunk's bottom segment to the convergence knot: set its
+        // bottomJoint to a joint at the knot so the shaft starts from the convergence.
+        const bottomSeg = fork.trunk.segments[0];
+        bottomSeg.bottomJoint = {
+          id: generateUuid(),
+          pos: { x: best.pos.x, y: best.pos.y, z: best.pos.z },
+          diameter: best.diameter ?? getJointDiameter(bottomSeg.diameter),
+        };
+        // Emit the fork as a BRANCH (parented to the convergence knot), not a trunk.
+        // The host routes every trunk through SmartPlacementV2, which always grounds
+        // to the plate — wrong for a junction held mid-air by braces, and the cause
+        // of the spikes through the model. A branch is built parented to its knot and
+        // is never grounded, so the junction stays where Chitubox authored it.
+        const forkBranch: Branch = {
+          id: fork.trunk.id,
+          modelId: fork.trunk.modelId,
+          parentKnotId: best.id,
+          segments: fork.trunk.segments,
+          contactCone: fork.trunk.contactCone,
+        };
+        branches.push(forkBranch);
+        // Remove the trunk now that it's represented as a branch.
+        const ti = trunks.findIndex((t) => t.id === fork.trunk.id);
+        if (ti >= 0) trunks.splice(ti, 1);
+        droppedRootIds.add(fork.rootId);
+        forksReanchored++;
+      }
+      // Drop the floating roots we re-anchored.
+      if (droppedRootIds.size > 0) {
+        for (let i = roots.length - 1; i >= 0; i--) {
+          if (droppedRootIds.has(roots[i].id)) roots.splice(i, 1);
+        }
+      }
+      console.log(`${LOG_PREFIX} fork junctions`, {
+        total: forkJunctionTrunks.length,
+        reanchored: forksReanchored,
+        rootsDropped: droppedRootIds.size,
+      });
+    }
+
+    // --- Brace-fed junction branches (multi-level support trees). ---
+    // A junction is a tip-bearing knot with NO pillar of its own, reached by a
+    // single diagonal brace from a grounded pillar's knot, with its tips fanning
+    // out to the model. The flat pillar→knot→tips model drops these entirely, so
+    // we rebuild each as a DragonFruit Branch: parented to the pillared knot the
+    // brace comes from (resolved onto that pillar's shaft so the host can recompute
+    // it), its first segment runs up to the junction, and the tips become contact
+    // cones (primary on the branch; extras as sub-branches off a knot at the
+    // junction). This recovers the whole upper tier of the support tree.
+    const modelJunctions = model.junctionBranches ?? [];
+    let junctionBranchesBuilt = 0;
+    let junctionTipsBuilt = 0;
+    let junctionDropped = 0;
+    for (const jb of modelJunctions) {
+      const parentPos: Vec3 = { x: jb.parentX, y: jb.parentY, z: jb.parentZ - raftZ };
+      const junctionPos: Vec3 = { x: jb.junctionX, y: jb.junctionY, z: jb.junctionZ - raftZ };
+      const shaftDiameter = Number.isFinite(jb.diameter) && jb.diameter > 0
+        ? jb.diameter
+        : shaftDefaults.diameterMm;
+
+      // Parent the branch to the grounded pillar's shaft at the parent point. If
+      // no shaft resolves there, skip (can't attach a free-floating branch).
+      const parentRef = nearestShaft(parentPos.x, parentPos.y);
+      if (!parentRef) { junctionDropped++; continue; }
+      const proj = projectToShaft(parentRef, parentPos);
+      const parentKnot: Knot = {
+        id: generateUuid(),
+        parentShaftId: proj.segmentId,
+        t: proj.t,
+        pos: parentPos,
+        diameter: getJointDiameter(shaftDiameter),
+        _importHint: 'preserve',
+      };
+      knots.push(parentKnot);
+
+      if (jb.tips.length === 0) { junctionDropped++; continue; }
+
+      // Native junction (Option A, same as multi-tip trunks): a Branch runs from the
+      // parent knot (on the grounded pillar's shaft) up to a terminal joint at the
+      // JUNCTION, a single knot sits at that junction on the branch shaft, and EVERY
+      // junction tip becomes a Leaf radiating from that knot. No mid-junction joint
+      // with cones fanning off at an angle — that produced the kink. The branch shaft
+      // simply carries the load up to the junction knot, and the tips hang off it as
+      // leaves, exactly as DF would if the junction had been hand-placed.
+      const junctionTerminalJoint: Joint = {
+        id: generateUuid(),
+        pos: junctionPos,
+        diameter: getJointDiameter(shaftDiameter),
+      };
+      const branchSeg: Segment = {
+        id: generateUuid(),
+        type: 'straight',
+        diameter: shaftDiameter,
+        bottomJoint: undefined, // connects to the parent knot
+        topJoint: junctionTerminalJoint,
+      };
+      const junctionBranch: Branch = {
+        id: generateUuid(),
+        modelId: placeholderModelId,
+        parentKnotId: parentKnot.id,
+        segments: [branchSeg],
+        contactCone: undefined, // shaft ends in the junction knot, not a cone
+      };
+      branches.push(junctionBranch);
+      junctionBranchesBuilt++;
+
+      // The single junction knot, riding the branch segment at the junction.
+      // NOTE: must NOT share the `junctionPos` object with junctionTerminalJoint
+      // above. applyZShift/applyXYShift dedupe JOINTS by id but iterate knots
+      // separately assuming each knot owns a distinct pos object; a shared ref is
+      // shifted once as the segment topJoint AND again as a knot, double-shifting
+      // the whole upper junction tier by (plateX, plateY, -raftZ) into the model.
+      // Clone the position so each structure owns its own pos (matches the working
+      // multi-tip trunk path, which builds a fresh sharedKnotPos for its knot).
+      const junctionKnot: Knot = {
+        id: generateUuid(),
+        parentShaftId: branchSeg.id,
+        pos: { x: junctionPos.x, y: junctionPos.y, z: junctionPos.z },
+        diameter: getJointDiameter(shaftDiameter),
+        _importHint: 'preserve',
+      };
+      knots.push(junctionKnot);
+
+      // Every junction tip radiates from the junction knot as a Leaf (short) or a
+      // Branch (long: thin shaft + short native cone), same as multi-tip trunk tips.
+      for (const tip of jb.tips) {
+        const { leaf, branch } = buildTipFromKnot(
+          tip,
+          junctionKnot,
+          junctionKnot.pos,
+          new THREE.Vector3(tip.x, tip.y, tip.contactZ - raftZ),
+          shaftDiameter,
+          placeholderModelId,
+          tipDefaults,
+          mesh,
+        );
+        if (leaf) leaves.push(leaf);
+        if (branch) branches.push(branch);
+        junctionTipsBuilt++;
+      }
+    }
+    if (modelJunctions.length > 0) {
+      console.log(`${LOG_PREFIX} junction branches`, {
+        total: modelJunctions.length,
+        built: junctionBranchesBuilt,
+        tips: junctionTipsBuilt,
+        dropped: junctionDropped,
+      });
+    }
+
+    // --- Twigs (sub-12): tiny model-to-model struts. ---
+    // A twig is a short body bridging two contact points on the model. We build it
+    // to match the host's own buildTwig EXACTLY (SupportTypes/Twig/twigBuilder.ts):
+    //   - a minimal disk-type ContactDiskProfile (type + the 3 disk fields only),
+    //   - real per-endpoint surface normals recovered from the model mesh (the
+    //     authored format stores none), used to orient each disk INTO the model,
+    //   - the shaft running between two joints that sit OFF the surface by the
+    //     disk stand-off along each surface normal,
+    //   - joints sized 1.1x the disk contact diameter, and diskLengthOverride set.
+    // Matching the canonical builder removes every structural variable: the disks
+    // face the model (not along the strut) and the twig renders like a native one.
+    const modelTwigs = model.twigs ?? [];
+    const twigs: Twig[] = [];
+    const JOINT_TAPER = 1.1; // twig joint = 1.1x its disk contact diameter
+    const JOINT_CLEARANCE_MM = 0.05;
+    // Recover the model surface normal at a contact point. The contact sits ON the
+    // model; we want the normal of the face it actually rests on, oriented OUT of the
+    // solid (the direction the twig disk stands off). The earlier approach cast a
+    // single ray ALONG the strut to find that face — but for a twig whose strut runs
+    // nearly tangent to the surface (e.g. a contact on a near-horizontal overhang),
+    // that ray skims past the local face and hits a DIFFERENT wall, yielding a normal
+    // anti-aligned with the true surface. The disk cap then faces empty space instead
+    // of lying flat on the model — the "disk sitting outside the model" artefact.
+    //
+    // Instead, probe in MANY directions and take the NEAREST hit face: that is the
+    // surface the contact rests on, regardless of strut orientation. Then orient the
+    // face normal outward with an inside/outside test. Raycast-only (no BVH needed),
+    // matching the rest of the converter. Falls back to the strut axis on no mesh/hit.
+    const STANDOFF_PROBE_MM = 0.6;
+    const pointInsideModel = (p: THREE.Vector3): boolean => {
+      if (!mesh) return false;
+      // 6-axis ray-parity majority: robust to thin/concave regions where a single
+      // axis gives a false odd-crossing. Inside iff a majority of axes report odd.
+      const dirs: ReadonlyArray<readonly [number, number, number]> = [
+        [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
+      ];
+      let votes = 0;
+      const rc = new THREE.Raycaster();
+      for (const d of dirs) {
+        rc.set(p, new THREE.Vector3(d[0], d[1], d[2]));
+        if (rc.intersectObject(mesh, false).length % 2 === 1) votes++;
+      }
+      return votes >= 4;
+    };
+    // 14 probe directions: 6 axes + 8 diagonals, enough to find the nearest face on
+    // overhangs of any orientation without the cost of a full sphere of rays.
+    const PROBE_DIRS: ReadonlyArray<readonly [number, number, number]> = [
+      [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
+      [1, 1, 0], [-1, 1, 0], [1, -1, 0], [-1, -1, 0],
+      [0, 1, 1], [0, -1, 1], [0, 1, -1], [0, -1, -1],
+    ];
+    const PROBE_BACKOFF_MM = 0.4;
+    const recoverSurfaceNormal = (contact: Vec3, _towardOther: Vec3, fallback: Vec3): Vec3 => {
+      if (!mesh) return fallback;
+      const raycaster = new THREE.Raycaster();
+      let bestNormal: THREE.Vector3 | null = null;
+      let bestErr = Infinity;
+      const origin = new THREE.Vector3();
+      for (const d of PROBE_DIRS) {
+        const dir = new THREE.Vector3(d[0], d[1], d[2]).normalize();
+        // Start a hair behind the contact along the probe so a face we're sitting on
+        // is in front of the ray; the hit nearest to the contact is the resting face.
+        origin.set(contact.x, contact.y, contact.z).addScaledVector(dir, -PROBE_BACKOFF_MM);
+        raycaster.set(origin, dir);
+        const hits = raycaster.intersectObject(mesh, false);
+        if (hits.length === 0 || !hits[0].face) continue;
+        const err = Math.abs(hits[0].distance - PROBE_BACKOFF_MM);
+        if (err < bestErr) {
+          bestErr = err;
+          bestNormal = hits[0].face.normal.clone().transformDirection(mesh.matrixWorld).normalize();
+        }
+      }
+      if (!bestNormal) return fallback;
+      // Orient OUTWARD: a point a small stand-off along +n must be OUTSIDE the model.
+      const probe = new THREE.Vector3(
+        contact.x + bestNormal.x * STANDOFF_PROBE_MM,
+        contact.y + bestNormal.y * STANDOFF_PROBE_MM,
+        contact.z + bestNormal.z * STANDOFF_PROBE_MM,
+      );
+      if (pointInsideModel(probe)) bestNormal.multiplyScalar(-1);
+      return { x: bestNormal.x, y: bestNormal.y, z: bestNormal.z };
+    };
+
+    for (const t of modelTwigs) {
+      const contactDiameter = Number.isFinite(t.diameter) && t.diameter > 0
+        ? t.diameter
+        : shaftDefaults.diameterMm;
+      const posA: Vec3 = { x: t.ax, y: t.ay, z: t.az - raftZ };
+      const posB: Vec3 = { x: t.bx, y: t.by, z: t.bz - raftZ };
+
+      // Strut axis A→B (cone axis for disk A; reversed for disk B).
+      const axisA = normalizeVec({ x: posB.x - posA.x, y: posB.y - posA.y, z: posB.z - posA.z });
+      const axisB = { x: -axisA.x, y: -axisA.y, z: -axisA.z };
+
+      // Real surface normals at each end (fallback: the strut axis, pointing out).
+      const normalA = recoverSurfaceNormal(posA, posB, axisB);
+      const normalB = recoverSurfaceNormal(posB, posA, axisA);
+
+      // Minimal disk-type profile — EXACTLY the host ContactDiskProfile shape
+      // (type + diskThicknessMm + maxStandoffMm + standoffAngleThreshold). No tip
+      // fields: a ContactDiskProfile does not carry contact/body/length/penetration.
+      const diskProfile = () => ({
+        type: 'disk' as const,
+        diskThicknessMm: tipDefaults.diskThicknessMm ?? 0.1,
+        maxStandoffMm: tipDefaults.maxStandoffMm ?? 1.5,
+        standoffAngleThreshold: tipDefaults.standoffAngleThreshold ?? Math.PI / 4,
+      });
+      const profA = diskProfile();
+      const profB = diskProfile();
+
+      const jointDiameterA = contactDiameter * JOINT_TAPER;
+      const jointDiameterB = contactDiameter * JOINT_TAPER;
+
+      // Disk stand-off: the larger of the angle-based disk thickness and the
+      // joint radius + clearance (matches twigDiskJointStandoff).
+      const standoff = (normal: Vec3, axis: Vec3, jointDia: number, prof: ReturnType<typeof diskProfile>): number => {
+        const angleBased = calculateDiskThickness(normal, axis, prof);
+        const radiusBased = jointDia / 2 + JOINT_CLEARANCE_MM;
+        return Math.max(angleBased, radiusBased);
+      };
+      const thicknessA = standoff(normalA, axisA, jointDiameterA, profA);
+      const thicknessB = standoff(normalB, axisB, jointDiameterB, profB);
+
+      // Joints sit OFF the surface along each surface normal (like the host).
+      const jointPosA: Vec3 = {
+        x: posA.x + normalA.x * thicknessA,
+        y: posA.y + normalA.y * thicknessA,
+        z: posA.z + normalA.z * thicknessA,
+      };
+      const jointPosB: Vec3 = {
+        x: posB.x + normalB.x * thicknessB,
+        y: posB.y + normalB.y * thicknessB,
+        z: posB.z + normalB.z * thicknessB,
+      };
+
+      const diskA: ContactDisk = {
+        id: generateUuid(),
+        pos: posA,
+        surfaceNormal: normalA,
+        coneAxis: axisA,
+        diskLengthOverride: thicknessA,
+        profile: profA,
+        contactDiameterMm: contactDiameter,
+      };
+      const diskB: ContactDisk = {
+        id: generateUuid(),
+        pos: posB,
+        surfaceNormal: normalB,
+        coneAxis: axisB,
+        diskLengthOverride: thicknessB,
+        profile: profB,
+        contactDiameterMm: contactDiameter,
+      };
+
+      twigs.push({
+        id: generateUuid(),
+        modelId: placeholderModelId,
+        segments: [
+          {
+            id: generateUuid(),
+            type: 'straight',
+            diameter: contactDiameter, // legacy uniform value (taper carried by joints)
+            bottomJoint: { id: generateUuid(), pos: jointPosA, diameter: jointDiameterA },
+            topJoint: { id: generateUuid(), pos: jointPosB, diameter: jointDiameterB },
+          },
+        ],
+        contactDiskA: diskA,
+        contactDiskB: diskB,
+      });
+    }
+    if (modelTwigs.length > 0) {
+      console.log(`${LOG_PREFIX} twigs`, { total: modelTwigs.length });
+    }
+
+    // --- Leaf sanity pass ---------------------------------------------------
+    // A Leaf is a shaft-less cone straight from the knot to the contact, valid only
+    // when the knot is ~one tip-length from the contact. Some leaves are classified
+    // when their knot is close, but the knot is later relocated (junction composition,
+    // shaft splits) so the final knot→contact distance is much larger. A long leaf
+    // has no shaft to follow the surface and tunnels straight through the model.
+    // Here we re-check every leaf against its FINAL knot position and convert any
+    // over-long one into a Branch (shaft knot→socket + short native cone), which
+    // approaches the contact along the surface instead of cutting through.
+    {
+      const knotById = new Map(knots.map((k) => [k.id, k]));
+      const tipLen = CBX_TIP_DEFAULTS.lengthMm;
+      const keptLeaves: Leaf[] = [];
+      let converted = 0;
+      for (const leaf of leaves) {
+        const knot = leaf.parentKnotId ? knotById.get(leaf.parentKnotId) : undefined;
+        const cc = leaf.contactCone;
+        if (!knot || !cc) { keptLeaves.push(leaf); continue; }
+        const knotToContact = Math.hypot(cc.pos.x - knot.pos.x, cc.pos.y - knot.pos.y, cc.pos.z - knot.pos.z);
+        if (knotToContact <= tipLen + LEAF_MAX_SHAFT_MM) { keptLeaves.push(leaf); continue; }
+
+        // Over-long: rebuild as a Branch. Re-solve a short native cone + socket from
+        // the knot toward the contact via createContactAssembly (the LYS contract),
+        // so the cone is a short tip near the contact and the shaft carries the rest.
+        const shaftDia = (cc.profile as any)?.bodyDiameterMm
+          ? Math.max((cc.profile as any).bodyDiameterMm, 0.8)
+          : 0.8;
+        const assembly = createContactAssembly(
+          { id: generateUuid(), base: { x: knot.pos.x, y: knot.pos.y, z: knot.pos.z }, tip: { x: cc.pos.x, y: cc.pos.y, z: cc.pos.z } },
+          new THREE.Vector3(cc.pos.x, cc.pos.y, cc.pos.z),
+          knot.pos,
+          { length: tipLen, diameter: CBX_TIP_DEFAULTS.bodyDiameterMm, pointDiameter: CBX_TIP_DEFAULTS.contactDiameterMm },
+          CBX_TIP_DEFAULTS,
+          mesh,
+          false, false, null, true,
+        );
+        branches.push({
+          id: generateUuid(),
+          modelId: leaf.modelId,
+          parentKnotId: knot.id,
+          segments: [
+            { id: generateUuid(), type: 'straight', diameter: shaftDia, bottomJoint: undefined, topJoint: assembly.socketJoint },
+          ],
+          contactCone: assembly.contactCone,
+        });
+        converted++;
+      }
+      leaves.length = 0;
+      leaves.push(...keptLeaves);
+      if (CBX_DEBUG && converted > 0) {
+        cbxDebug(`leaf sanity pass: converted ${converted} over-long leaf/leaves into branches (were tunnelling)`);
+      }
+    }
+
+    // --- Knot-centering sanity pass ----------------------------------------
+    // Resolve clusters of near-coincident brace knots on the same shaft to one
+    // shared spot (without merging them), so authored brace scatter doesn't leave a
+    // fan of attach points that makes the host's overhang support messier than the
+    // single clean attachment seen in Chitubox. Contact (leaf/branch) knots are used
+    // as anchors but never moved.
+    {
+      const braceKnotIds = new Set<string>();
+      for (const br of braces) {
+        if (br.startKnotId) braceKnotIds.add(br.startKnotId);
+        if (br.endKnotId) braceKnotIds.add(br.endKnotId);
+      }
+      const contactKnotIds = new Set<string>();
+      for (const br of branches) {
+        if (br.parentKnotId) contactKnotIds.add(br.parentKnotId);
+      }
+      for (const lf of leaves) {
+        if (lf.parentKnotId) contactKnotIds.add(lf.parentKnotId);
+      }
+      const movedKnots = centerCoincidentKnots({ knots, braceKnotIds, contactKnotIds });
+      if (CBX_DEBUG && movedKnots > 0) {
+        cbxDebug(`knot-centering pass: resolved ${movedKnots} coincident brace knot(s) onto shared shaft spots`);
+      }
+    }
+
+    // --- Degenerate-joint collapse pass ------------------------------------
+    // Remove near-zero-length shaft stubs whose two end joints would render as a
+    // lump of overlapping spheres at a trunk top / branch attach point. Structural
+    // only: the contact cone's socket joint (and therefore every tip contact) is
+    // preserved; we only drop the redundant lower joint and re-point any riding
+    // knots onto the merged segment.
+    {
+      const collapsed = collapseDegenerateJoints({ trunks, branches, knots });
+      if (CBX_DEBUG && collapsed > 0) {
+        cbxDebug(`joint-collapse pass: removed ${collapsed} degenerate shaft stub(s)`);
+      }
+    }
+
     const result: DragonfruitImportFormat = {
       version: 1,
       meta: {
@@ -722,8 +1175,8 @@ export class CbxConverter {
       roots,
       trunks,
       branches,
-      leaves: [],
-      twigs: [],
+      leaves,
+      twigs,
       sticks: [],
       braces,
       anchors: [],
@@ -739,6 +1192,39 @@ export class CbxConverter {
       knots: result.knots.length,
       raftZ,
     });
+
+    if (CBX_DEBUG && mesh) {
+      // Self-check: sample each support shaft along its length and report any segment
+      // whose interior passes THROUGH the model (odd ray-crossing parity = inside).
+      // This catches "support goes straight through the model" that pure seating
+      // checks miss, and names which primitive/where so we can chase it.
+      const insideMesh = (p: THREE.Vector3): boolean => {
+        const rc = new THREE.Raycaster(p, new THREE.Vector3(1, 0, 0));
+        return rc.intersectObject(mesh, false).length % 2 === 1;
+      };
+      const knotById = new Map(result.knots.map((k) => [k.id, k]));
+      let shaftThrough = 0;
+      const sampleShaft = (label: string, segs: Segment[], parentPos: Vec3 | undefined, conePos: Vec3 | undefined) => {
+        for (const s of segs) {
+          const bot = s.bottomJoint?.pos ?? parentPos;
+          const top = s.topJoint?.pos ?? conePos;
+          if (!bot || !top) continue;
+          let hitInside = 0;
+          for (let i = 1; i <= 6; i++) {
+            const f = i / 7;
+            const p = new THREE.Vector3(bot.x + (top.x - bot.x) * f, bot.y + (top.y - bot.y) * f, bot.z + (top.z - bot.z) * f);
+            if (insideMesh(p)) hitInside++;
+          }
+          if (hitInside >= 2) { shaftThrough++; cbxDebug(`SHAFT THROUGH MODEL (${label}): ${hitInside}/6 samples inside, bot z=${bot.z.toFixed(2)} top z=${top.z.toFixed(2)}`); }
+        }
+      };
+      for (const t of result.trunks) sampleShaft('trunk', t.segments, t.segments[0]?.bottomJoint?.pos, t.contactCone?.pos);
+      for (const br of result.branches) {
+        const pk = br.parentKnotId ? knotById.get(br.parentKnotId) : undefined;
+        sampleShaft('branch', br.segments, pk?.pos, br.contactCone?.pos);
+      }
+      cbxDebug(`penetration self-check: ${shaftThrough} shaft segment(s) pass through the model`);
+    }
 
     return result;
   }
@@ -802,125 +1288,17 @@ export class CbxConverter {
    * contact-cone positions, and Knots. Joints shared across segments are shifted
    * once via an id set.
    */
+  // Cluster transform operations live in converter/clusterTransform; these static
+  // methods delegate to them to preserve the existing CbxConverter.* public API.
   static applyZShift(data: DragonfruitImportFormat, deltaZ: number): void {
-    if (!Number.isFinite(deltaZ) || Math.abs(deltaZ) < 1e-6) return;
-
-    const shiftedJointIds = new Set<string>();
-    const shiftJoint = (joint?: Joint) => {
-      if (!joint?.pos) return;
-      if (joint.id && shiftedJointIds.has(joint.id)) return;
-      joint.pos.z += deltaZ;
-      if (joint.id) shiftedJointIds.add(joint.id);
-    };
-    const shiftCone = (cone?: { pos: Vec3 }) => {
-      if (cone?.pos) cone.pos.z += deltaZ;
-    };
-    const shiftSegments = (segments: Segment[]) => {
-      for (const seg of segments) {
-        shiftJoint(seg.bottomJoint);
-        shiftJoint(seg.topJoint);
-      }
-    };
-
-    for (const root of data.roots) {
-      if (root.transform?.pos) root.transform.pos.z += deltaZ;
-    }
-    for (const trunk of data.trunks) {
-      shiftSegments(trunk.segments);
-      shiftCone(trunk.contactCone);
-    }
-    for (const branch of data.branches) {
-      shiftSegments(branch.segments);
-      shiftCone(branch.contactCone);
-    }
-    for (const knot of data.knots) {
-      if (knot.pos) knot.pos.z += deltaZ;
-    }
+    clusterApplyZShift(data, deltaZ);
   }
 
-  /**
-   * Shift every support entity in XY by (`deltaX`, `deltaY`). The XY analogue of
-   * applyZShift: used to move a converted support cluster from its authored
-   * model-local frame to the model's plate position (header +660/+664).
-   *
-   * Chitubox authors each model's geometry AND its supports in the same
-   * model-local frame (both centred near the local origin); the per-instance
-   * plate XY is the translation onto the build plate. Applying the same XY delta
-   * to the supports here and to the model's transform.position in the bridge
-   * keeps the two locked together while spreading models across the plate.
-   *
-   * Walks the same Z-bearing fields applyZShift does (roots, segment joints,
-   * contact cones, knots), shifting their X/Y. Shared joints are shifted once.
-   */
   static applyXYShift(data: DragonfruitImportFormat, deltaX: number, deltaY: number): void {
-    if (
-      (!Number.isFinite(deltaX) || Math.abs(deltaX) < 1e-6) &&
-      (!Number.isFinite(deltaY) || Math.abs(deltaY) < 1e-6)
-    ) {
-      return;
-    }
-    const dx = Number.isFinite(deltaX) ? deltaX : 0;
-    const dy = Number.isFinite(deltaY) ? deltaY : 0;
-
-    const shiftedJointIds = new Set<string>();
-    const shiftJoint = (joint?: Joint) => {
-      if (!joint?.pos) return;
-      if (joint.id && shiftedJointIds.has(joint.id)) return;
-      joint.pos.x += dx;
-      joint.pos.y += dy;
-      if (joint.id) shiftedJointIds.add(joint.id);
-    };
-    const shiftCone = (cone?: { pos: Vec3 }) => {
-      if (cone?.pos) {
-        cone.pos.x += dx;
-        cone.pos.y += dy;
-      }
-    };
-    const shiftSegments = (segments: Segment[]) => {
-      for (const seg of segments) {
-        shiftJoint(seg.bottomJoint);
-        shiftJoint(seg.topJoint);
-      }
-    };
-
-    for (const root of data.roots) {
-      if (root.transform?.pos) {
-        root.transform.pos.x += dx;
-        root.transform.pos.y += dy;
-      }
-    }
-    for (const trunk of data.trunks) {
-      shiftSegments(trunk.segments);
-      shiftCone(trunk.contactCone);
-    }
-    for (const branch of data.branches) {
-      shiftSegments(branch.segments);
-      shiftCone(branch.contactCone);
-    }
-    for (const knot of data.knots) {
-      if (knot.pos) {
-        knot.pos.x += dx;
-        knot.pos.y += dy;
-      }
-    }
+    clusterApplyXYShift(data, deltaX, deltaY);
   }
 
-  /**
-   * Pin every Roots base to the build plate (z = `plateZ`, default 0), leaving
-   * the rest of each support (shaft joints, knots, contact cones) untouched.
-   *
-   * Why: DragonFruit treats a support's ROOT as anchored in plate space and its
-   * contact cone as anchored to the model surface — the shaft between them is
-   * solved/stretched by the host. After applyZShift puts the whole support in
-   * the host's centered-model frame (so cones meet the model), the roots end up
-   * below the plate. This re-seats just the roots on the plate; the first shaft
-   * segment has `bottomJoint: undefined` (= "connects to Root"), so the host
-   * re-solves the shaft from the plate up to the first joint automatically — the
-   * visual result is a support standing on the plate and reaching up to the model.
-   */
   static seatRootsOnPlate(data: DragonfruitImportFormat, plateZ = 0): void {
-    for (const root of data.roots) {
-      if (root.transform?.pos) root.transform.pos.z = plateZ;
-    }
+    clusterSeatRootsOnPlate(data, plateZ);
   }
 }

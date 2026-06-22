@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { CbxModelInput, CbxSupport, CbxBrace } from './CbxConverter';
+import type { CbxModelInput, CbxSupport, CbxBrace, CbxTwig, CbxJunctionBranch } from './CbxConverter';
 
 /**
  * Parser for `.chitubox` project files.
@@ -42,6 +42,8 @@ const FOOT_SUB = 5; // wide flat ground-contact disk; its bottom marks the plate
                     // One sits under each support (sometimes clustered into what
                     // looks like a "platform"). The disk bottom is always exactly
                     // at the plate, so it is the authoritative ground anchor.
+const TWIG_SUB = 12; // tiny model-to-model support: a short strut whose BOTH ends
+                     // contact the model, using the model itself as the brace.
 const MODEL_HDR_SUB = 2; // skip
 const SUMMARY_SUB = 6; // skip (was previously NOT skipped — bug)
 
@@ -51,7 +53,13 @@ const COORD_LIMIT = 500; // reject vertices outside ±500mm (matches Python guar
 // (diagonal shaft-to-shaft strut) rather than a vertical pillar. Vertical pillars
 // have identical endpoints (delta ~0); the smallest real braces span >1.5mm, so
 // 0.8mm cleanly separates the two without catching sensor noise.
-const BRACE_XY_MIN = 0.8;
+// A sub-3 record is a diagonal BRACE (not a vertical pillar) when its two
+// endpoints differ in XY by more than this. Authored pillars are dead-vertical
+// (dXY < 0.01); braces are ≥ ~0.5 (and 45°, dz ≈ dXY). The 0.01–0.5 band is empty
+// across every test file, so 0.3 cleanly separates the two with wide margin and
+// catches short braces (dXY ≈ 0.78) that a higher cut (0.8) misclassified as
+// near-vertical pillars — which then produced spurious mid-air roots.
+const BRACE_XY_MIN = 0.3;
 
 const LOG_PREFIX = '[CbxParser]';
 
@@ -169,7 +177,7 @@ function parseSupportBlock(
   geoPtr: number,
   zOff: number,
   modelIdx: number,
-): { supports: CbxSupport[]; braces: CbxBrace[] } {
+): { supports: CbxSupport[]; braces: CbxBrace[]; twigs: CbxTwig[]; junctionBranches: CbxJunctionBranch[] } {
   void bytes; // reserved: support-chain parsing reads via the DataView only.
   const totalRecBytes = geoPtr - recBase;
   const totalRecs = Math.floor(totalRecBytes / REC_SIZE);
@@ -260,6 +268,16 @@ function parseSupportBlock(
     })),
   ];
 
+  // Twigs (sub-12): tiny model-to-model struts. Both endpoints are contact points
+  // on the model surface; paramA == paramB is the uniform body/contact radius.
+  const twigs: CbxTwig[] = recs
+    .filter((r) => r.sub === TWIG_SUB)
+    .map((r) => ({
+      ax: r.x, ay: r.y, az: r.topZ,
+      bx: r.x2, by: r.y2, bz: r.botZ,
+      diameter: Math.max(r.paramA, r.paramB) * 2,
+    }));
+
   const near = (a: number, b: number, t = 0.05) => Math.abs(a - b) < t;
   const xyNear = (r1: RawRecord, r2: RawRecord, t = 0.06) =>
     Math.abs(r1.x - r2.x) < t && Math.abs(r1.y - r2.y) < t;
@@ -285,6 +303,7 @@ function parseSupportBlock(
 
   // Assign each tip to the chain whose knot center matches its botZ; tiebreak by
   // XY distance from the pillar (handles branched tips + stacked supports).
+  const unassignedTips: RawRecord[] = [];
   for (const t of tips) {
     let best: Chain | null = null;
     let bestScore = Infinity;
@@ -299,6 +318,127 @@ function parseSupportBlock(
       }
     }
     if (best) best.tips.push(t);
+    else unassignedTips.push(t);
+  }
+
+  // --- Brace-fed junction branches (multi-level support trees). ---
+  // A tip whose socket lands on no pillar-chain knot belongs to a high JUNCTION
+  // knot that has no pillar of its own — it is reached by a single diagonal brace
+  // from a grounded pillar's knot, with the tips fanning out to the model. Group
+  // such tips by their junction knot and rebuild each junction as a DragonFruit
+  // branch (parented to the brace's origin knot). Without this the whole upper tier
+  // of a complex tree (junction knots + all their tips) is silently dropped.
+  const junctionBranches: CbxJunctionBranch[] = [];
+  // Indices of braces consumed as junction feeders — removed from the brace list
+  // before return so they aren't ALSO built as standalone braces (one physical
+  // strut → one primitive; building both leaves a disconnected brace gap).
+  const consumedFeederBraceIdx = new Set<number>();
+  if (unassignedTips.length > 0) {
+    const JUNCTION_XY_TOL = 0.4;
+    const JUNCTION_Z_TOL = 0.6;
+    // Knots with NO pillar beneath them (candidates for junctions).
+    const knotHasPillar = (k: RawRecord): boolean => {
+      const center = (k.topZ + k.botZ) / 2;
+      return pillars.some(
+        (p) => Math.hypot(p.x - k.x, p.y - k.y) <= JUNCTION_XY_TOL
+          && Math.abs(Math.max(p.topZ, p.botZ) - center) <= 0.8,
+      );
+    };
+    const pillarlessKnots = knots.filter((k) => !knotHasPillar(k));
+
+    // Which junction knot a tip socket lands on (or null).
+    const junctionKnotForTip = (t: RawRecord): RawRecord | null => {
+      for (const k of pillarlessKnots) {
+        const center = (k.topZ + k.botZ) / 2;
+        if (
+          Math.hypot(t.x2 - k.x, t.y2 - k.y) <= JUNCTION_XY_TOL
+          && Math.abs(t.botZ - center) <= JUNCTION_Z_TOL
+        ) return k;
+      }
+      return null;
+    };
+
+    // All feeding braces (sub-3 + pillar-link) as endpoint pairs, for parent lookup.
+    const braceEnds = braces.map((br) => ({
+      a: { x: br.ax, y: br.ay, z: br.az },
+      b: { x: br.bx, y: br.by, z: br.bz },
+      diameter: br.diameter,
+    }));
+    // The pillared knot nearest a point (the brace's origin → branch parent).
+    const pillaredKnotAt = (x: number, y: number, z: number): RawRecord | null => {
+      let best: RawRecord | null = null;
+      let bestD = Infinity;
+      for (const k of knots) {
+        if (!knotHasPillar(k)) continue;
+        const center = (k.topZ + k.botZ) / 2;
+        const d = Math.hypot(k.x - x, k.y - y, center - z);
+        if (d < bestD && d <= 1.0) { bestD = d; best = k; }
+      }
+      return best;
+    };
+
+    // Group unassigned tips by their junction knot.
+    const byJunction = new Map<RawRecord, RawRecord[]>();
+    for (const t of unassignedTips) {
+      const jk = junctionKnotForTip(t);
+      if (!jk) continue; // genuinely orphaned (not a junction) — leave out
+      const list = byJunction.get(jk) ?? [];
+      list.push(t);
+      byJunction.set(jk, list);
+    }
+
+    for (const [jk, jkTips] of byJunction) {
+      const center = (jk.topZ + jk.botZ) / 2;
+      // Find the brace feeding this junction: one endpoint at the junction; the
+      // OTHER end is the parent attachment.
+      let parent: { x: number; y: number; z: number } | null = null;
+      let shaftDiameter = 0;
+      let feederBraceIdx = -1;
+      for (let bi = 0; bi < braceEnds.length; bi++) {
+        const be = braceEnds[bi];
+        for (const [end, other] of [[be.a, be.b], [be.b, be.a]] as const) {
+          if (
+            Math.hypot(end.x - jk.x, end.y - jk.y) <= JUNCTION_XY_TOL
+            && Math.abs(end.z - center) <= JUNCTION_Z_TOL
+          ) {
+            // Prefer the pillared knot at the brace's far end; fall back to the
+            // raw brace endpoint if none resolves (still a valid attach point).
+            const pk = pillaredKnotAt(other.x, other.y, other.z);
+            parent = pk ? { x: pk.x, y: pk.y, z: (pk.topZ + pk.botZ) / 2 } : { ...other };
+            shaftDiameter = be.diameter;
+            feederBraceIdx = bi;
+            break;
+          }
+        }
+        if (parent) break;
+      }
+      if (!parent) continue; // no feeding brace found — can't attach a branch
+      if (feederBraceIdx >= 0) consumedFeederBraceIdx.add(feederBraceIdx);
+
+      junctionBranches.push({
+        junctionX: jk.x,
+        junctionY: jk.y,
+        junctionZ: center,
+        parentX: parent.x,
+        parentY: parent.y,
+        parentZ: parent.z,
+        diameter: shaftDiameter > 0 ? shaftDiameter : jk.paramA * 2,
+        tips: jkTips.map((t) => ({
+          x: t.x,
+          y: t.y,
+          contactZ: t.topZ,
+          attachZ: t.botZ,
+          socketX: t.x2,
+          socketY: t.y2,
+          length: Math.sqrt(
+            (t.x - t.x2) ** 2 + (t.y - t.y2) ** 2 + (t.topZ - t.botZ) ** 2,
+          ),
+          contactDiameter: t.paramA * 2,
+          bodyDiameter: t.paramB * 2,
+          contactDepth: t.extra,
+        })),
+      });
+    }
   }
 
   // Ground supports to their sub-5 foot (option c). Each support sits on a wide
@@ -336,11 +476,47 @@ function parseSupportBlock(
   const isBracedPillar = (px: number, py: number): boolean =>
     bracedPillarXY.some((p) => Math.hypot(p.x - px, p.y - py) <= 0.4);
 
+  // Plate Z (world): the lowest pillar/base bottom in the cluster. Anything sitting
+  // well above it is mid-air. Both pillar.botZ and base.botZ are world frame here.
+  const plateZ = chains.reduce((lo, c) => {
+    const bottom = c.base ? Math.min(c.base.botZ, c.pillar.botZ) : c.pillar.botZ;
+    return Math.min(lo, bottom);
+  }, Infinity);
+
+  // How many brace ENDPOINTS land at a given XY and Z (the convergence test). A
+  // brace stores world endpoints (az/bz); a fork junction is where ≥2 of them meet
+  // the base of an otherwise-ungrounded pillar.
+  const MID_AIR_MM = 1.5; // base must be this far above the plate to count as mid-air
+  const CONV_XY_MM = 0.4;
+  const CONV_Z_MM = 0.6;
+  const convergingBraceCount = (px: number, py: number, pz: number): number => {
+    let n = 0;
+    for (const br of braces) {
+      if (Math.hypot(br.ax - px, br.ay - py) <= CONV_XY_MM && Math.abs(br.az - pz) <= CONV_Z_MM) n++;
+      if (Math.hypot(br.bx - px, br.by - py) <= CONV_XY_MM && Math.abs(br.bz - pz) <= CONV_Z_MM) n++;
+    }
+    return n;
+  };
+
+  // A fork junction: a pillar whose base is mid-air, has NO base pad / foot of its
+  // own, and has ≥2 braces converging at that base. Such pillars are branches
+  // growing out of the convergence, not grounded trunks. (Per the support model,
+  // no base "cup" should ever float off the plate — if it's airborne and fed by
+  // braces, it's a branch.)
+  const isForkJunction = (c: Chain): boolean => {
+    const baseZ = c.base ? c.base.botZ : c.pillar.botZ;
+    if (baseZ - plateZ <= MID_AIR_MM) return false; // grounded, not mid-air
+    if (c.base) return false; // has its own base pad → genuinely grounded support
+    if (footBottomFor(c.pillar.x, c.pillar.y) !== null) return false; // sits on a foot
+    return convergingBraceCount(c.pillar.x, c.pillar.y, c.pillar.botZ) >= 2;
+  };
+
   // Materialize into CbxSupport records.
   const supports: CbxSupport[] = [];
   let tiplessPillars = 0;
   let contactlessPillars = 0;
   let groundedToFoot = 0;
+  let forkJunctions = 0;
 
   for (const c of chains) {
     if (c.tips.length === 0 && !isBracedPillar(c.pillar.x, c.pillar.y)) {
@@ -358,6 +534,11 @@ function parseSupportBlock(
       // Sort tips tallest-first for deterministic primary-tip selection.
       c.tips.sort((a, b) => b.topZ - a.topZ);
     }
+
+    // Fork junction: a mid-air, braced, base-pad-less pillar is a branch growing
+    // out of the convergence rather than a grounded trunk (avoids a floating cup).
+    const fork = isForkJunction(c);
+    if (fork) forkJunctions++;
 
     // Ground to the support's sub-5 foot bottom, if it has one sitting below it.
     // Lower the base pad (preserving its cone height) to the foot bottom and
@@ -421,31 +602,37 @@ function parseSupportBlock(
           y: t.y,
           contactZ: t.topZ,
           attachZ: t.botZ, // where the tip meets the knot
+          socketX: t.x2, // authored socket XY → true approach direction (P1→P2)
+          socketY: t.y2,
           length: slantLength, // authored cone length (true 3D slant distance)
           contactDiameter: t.paramA * 2, // small end on the model
           bodyDiameter: t.paramB * 2, // larger socket end
           contactDepth: t.extra, // penetration into the model
         };
       }),
+      isForkJunction: fork,
     };
 
     supports.push(support);
   }
 
-  if (tiplessPillars > 0 || braces.length > 0 || groundedToFoot > 0 || contactlessPillars > 0) {
+  if (tiplessPillars > 0 || braces.length > 0 || groundedToFoot > 0 || contactlessPillars > 0 || forkJunctions > 0) {
     // One concise line. Tipless pillars are interior lattice struts (skipped);
     // contactless pillars are grounded brace-hosts kept without a contact cone;
+    // fork junctions are mid-air branch pillars re-parented to a convergence knot;
     // braces are shaft-to-shaft struts; grounded are supports lowered onto their
     // sub-5 foot bottom (the foot/platform geometry itself is not reproduced).
     console.debug(
       `${LOG_PREFIX} instance ${modelIdx}: ${supports.length} editable supports, `
       + `${braces.length} braces, ${tiplessPillars} interior strut pillar(s) skipped, `
       + `${contactlessPillars} contactless brace-host pillar(s), `
+      + `${forkJunctions} fork-junction branch(es), `
       + `${groundedToFoot} support(s) grounded to sub-5 foot.`,
     );
   }
 
-  return { supports, braces };
+  const filteredBraces = braces.filter((_, idx) => !consumedFeederBraceIdx.has(idx));
+  return { supports, braces: filteredBraces, twigs, junctionBranches };
 }
 
 /**
@@ -667,6 +854,8 @@ export class CbxParser {
       // Supports + braces: this instance's own block via the authored pointer.
       let supports: CbxSupport[] = [];
       let braces: CbxBrace[] = [];
+      let twigs: CbxTwig[] = [];
+      let junctionBranches: CbxJunctionBranch[] = [];
       if (h.supPtr !== NO_SUPPORT && h.supPtr !== 0) {
         const recBase = h.supPtr + INLINE_PAD;
         if (recBase > 0 && recBase < len && u32(view, recBase) === TAG_EA) {
@@ -674,6 +863,8 @@ export class CbxParser {
           const parsed = parseSupportBlock(view, bytes, recBase, geoPtr, zOff, h.index);
           supports = parsed.supports;
           braces = parsed.braces;
+          twigs = parsed.twigs;
+          junctionBranches = parsed.junctionBranches;
         } else {
           console.warn(
             `${LOG_PREFIX} instance ${h.index}: support pointer ${h.supPtr} (+${INLINE_PAD} `
@@ -688,6 +879,8 @@ export class CbxParser {
         geometry,
         supports,
         braces,
+        twigs,
+        junctionBranches,
         transform: { plateX: h.plateX, plateY: h.plateY, liftZ: h.liftZ },
       });
     }
