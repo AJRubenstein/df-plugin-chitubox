@@ -297,7 +297,7 @@ export async function importCbxFile(
     // Best-effort empty payload so the importer can surface a clean state.
     return {
       modelId: generateUuid(),
-      name: 'model_1',
+      objName: 'model_1',
       geometry: new THREE.BufferGeometry(),
       transform: {
         position: new THREE.Vector3(0, 0, 0),
