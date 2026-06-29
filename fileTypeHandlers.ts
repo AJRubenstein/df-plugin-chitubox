@@ -45,7 +45,7 @@ export type CbxImportPayload = {
    * this to label the imported object; without it the host falls back to the
    * project filename plus a numeric suffix (e.g. "guns (2)").
    */
-  name: string;
+  objName: string;
   geometry: THREE.BufferGeometry;
   transform: {
     position: THREE.Vector3;
@@ -253,7 +253,7 @@ function convertSingleModel(
 
   return {
     modelId: importedModelId,
-    name: deriveModelName(model.filename, model.index),
+    objName: deriveModelName(model.filename, model.index),
     geometry,
     transform,
     supportData: dragonfruitData,
