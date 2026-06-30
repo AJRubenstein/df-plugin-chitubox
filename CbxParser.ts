@@ -49,10 +49,6 @@ const SUMMARY_SUB = 6; // skip (was previously NOT skipped — bug)
 
 const INLINE_PAD = 436;
 const COORD_LIMIT = 500; // reject vertices outside ±500mm (matches Python guard)
-// A sub-3 record whose two endpoints differ in XY by more than this is a brace
-// (diagonal shaft-to-shaft strut) rather than a vertical pillar. Vertical pillars
-// have identical endpoints (delta ~0); the smallest real braces span >1.5mm, so
-// 0.8mm cleanly separates the two without catching sensor noise.
 // A sub-3 record is a diagonal BRACE (not a vertical pillar) when its two
 // endpoints differ in XY by more than this. Authored pillars are dead-vertical
 // (dXY < 0.01); braces are ≥ ~0.5 (and 45°, dz ≈ dXY). The 0.01–0.5 band is empty
@@ -73,6 +69,8 @@ function f32(view: DataView, off: number): number {
 
 /** One decoded 72-byte parametric record. */
 interface RawRecord {
+  /** Index of this record within its block's full record sequence. Diagnostic-only. */
+  recIndex: number;
   sub: number;
   x: number;
   y: number;
@@ -89,8 +87,9 @@ interface RawRecord {
   extra: number;
 }
 
-function readRecord(view: DataView, base: number): RawRecord {
+function readRecord(view: DataView, base: number, recIndex: number): RawRecord {
   return {
+    recIndex,
     sub: u32(view, base + 4),
     x: f32(view, base + 8),
     y: f32(view, base + 12),
@@ -187,7 +186,7 @@ function parseSupportBlock(
   for (let i = 0; i < totalRecs; i++) {
     const base = recBase + i * REC_SIZE;
     if (u32(view, base) !== TAG_EA) continue;
-    const rec = readRecord(view, base);
+    const rec = readRecord(view, base, i);
     if (rec.sub === MODEL_HDR_SUB || rec.sub === SUMMARY_SUB) continue;
     // Shift Z into world frame up front so all continuity math is in one frame.
     rec.topZ += zOff;
@@ -611,6 +610,7 @@ function parseSupportBlock(
         };
       }),
       isForkJunction: fork,
+      recordIndex: c.pillar.recIndex,
     };
 
     supports.push(support);

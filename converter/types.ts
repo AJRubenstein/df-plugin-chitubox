@@ -164,6 +164,8 @@ export interface CbxSupport {
    * braces create) instead of a grounded trunk with a floating root "cup".
    */
   isForkJunction?: boolean;
+  /** Index of this record in the container's flat support record list. Diagnostic-only. */
+  recordIndex?: number;
 }
 
 /**

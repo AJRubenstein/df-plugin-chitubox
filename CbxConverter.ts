@@ -57,8 +57,6 @@ import { generateUuid } from '@/utils/uuid';
  * is a placeholder; the host reassigns it via reassignModelId() after conversion.
  */
 
-// Shared CBX types, constants, and the debug helper now live in converter/types.
-// Re-exported here so existing importers of CbxConverter keep working unchanged.
 import {
   LOG_PREFIX,
   CBX_DEBUG,
@@ -96,12 +94,8 @@ export type {
  * transform — keeping geometry and supports in the same frame. Returns 0 when
  * there are no supports (nothing to anchor against).
  */
-// computeRaftZ / computeModelLift live in converter/clusterTransform; re-exported
-// here so existing importers of CbxConverter keep working.
 export { computeRaftZ, computeModelLift } from './converter/clusterTransform';
 
-/** Normalize a Vec3; returns a unit-Z fallback for a zero-length input. */
-// Geometry helpers extracted to converter/geometryHelpers.
 import {
   normalizeVec,
   synthSupportForTip,
@@ -150,6 +144,8 @@ function buildSupport(
 ): BuiltSupport {
   const z = (worldZ: number) => worldZ - raftZ; // raft-normalize into plate frame
 
+  const importSourceLabel = s.recordIndex != null ? `cbx-sub-${s.recordIndex}` : undefined;
+
   const shaftDiameter = Number.isFinite(s.pillarDiameter) && s.pillarDiameter > 0
     ? s.pillarDiameter
     : shaftDefaults.diameterMm;
@@ -172,6 +168,7 @@ function buildSupport(
     root = {
       id: rootId,
       modelId,
+      importSourceLabel,
       transform: { pos: { x: px, y: py, z: pillarBottom }, rot: { x: 0, y: 0, z: 0, w: 1 } },
       diameter: 0,
       diskHeight: 0,
@@ -183,6 +180,7 @@ function buildSupport(
     root = {
       id: rootId,
       modelId,
+      importSourceLabel,
       transform: { pos: { x: px, y: py, z: padBottom }, rot: { x: 0, y: 0, z: 0, w: 1 } },
       diameter: s.base.bottomRadius * 2, // wide end on the plate
       diskHeight: 0,
@@ -192,6 +190,7 @@ function buildSupport(
     root = {
       id: rootId,
       modelId,
+      importSourceLabel,
       transform: { pos: { x: px, y: py, z: pillarBottom }, rot: { x: 0, y: 0, z: 0, w: 1 } },
       diameter: rootDefaults.diameterMm,
       diskHeight: rootDefaults.diskHeightMm,
@@ -227,6 +226,7 @@ function buildSupport(
     const trunk: Trunk = {
       id: generateUuid(),
       modelId,
+      importSourceLabel,
       rootId,
       baseDiameterMm: shaftDiameter,
       segments: [soloSegment],
@@ -294,6 +294,7 @@ function buildSupport(
   const trunk: Trunk = {
     id: generateUuid(),
     modelId,
+    importSourceLabel,
     rootId,
     baseDiameterMm: shaftDiameter,
     segments,
@@ -337,8 +338,14 @@ function buildSupport(
         tipDefaults,
         mesh,
       );
-      if (leaf) leaves.push(leaf);
-      if (branch) branches.push(branch);
+      if (leaf) {
+        leaf.importSourceLabel = importSourceLabel;
+        leaves.push(leaf);
+      }
+      if (branch) {
+        branch.importSourceLabel = importSourceLabel;
+        branches.push(branch);
+      }
     }
   }
 
@@ -763,6 +770,7 @@ export class CbxConverter {
         const forkBranch: Branch = {
           id: fork.trunk.id,
           modelId: fork.trunk.modelId,
+          importSourceLabel: fork.trunk.importSourceLabel,
           parentKnotId: best.id,
           segments: fork.trunk.segments,
           contactCone: fork.trunk.contactCone,
