@@ -37,29 +37,25 @@ export function synthSupportForTip(tip: CbxTip, attachPos: Vec3): any {
  * tipSettings for createContactAssembly.
  *   length        ← authored cone length.
  *   pointDiameter ← AUTHORED contactDiameter (the model footprint). Never defaulted.
- *   diameter      ← AUTHORED bodyDiameter (Cbx `pb`, the connection cone's LOWER /
- *                   pillar-end diameter), capped at the shaft so it never overhangs.
+ *   diameter      ← the SHAFT diameter this tip grows from, not the authored Cbx
+ *                   bodyDiameter (`pb`).
  *
- * The Chitubox "Connection" cone tapers from the contact (upper) to a lower/pillar
- * diameter (`pb`). That lower diameter is the authored body and must be preserved —
- * it's often NARROWER than the shaft (e.g. a 0.80 shaft with a 0.50 connection),
- * giving the slim spike look. Forcing a native body (≥1.0) fattened these into
- * bulbs. We do cap at the shaft diameter so a body authored WIDER than its shaft
- * (some models) can't overhang the knot — min(authored, shaft) is slim where Chitu
- * is slim and never wider than the pillar it grows from.
+ * Cbx's "Connection" cone tapers from the contact (upper) to a lower/pillar
+ * diameter (`pb`) that's often narrower than the shaft (e.g. a 0.80 shaft with a
+ * 0.50 connection) — imported verbatim that reads as a fat joint ball necking down
+ * to a thin spike, since the engine sizes the socket JOINT to the shaft diameter
+ * (see applyTrunkDiameterProfile) independently of the cone's own body diameter.
+ * Matching the native DF behaviour (editing shaft diameter syncs tip body diameter
+ * to it, see updateShaftProfile) keeps the cone body flush with the shaft it grows
+ * from, which is the look the host produces by default and what a settings-dialog
+ * round-trip already converges imports to.
  *
- * @param shaftMm  the shaft/pillar diameter this tip grows from (the overhang cap).
+ * @param shaftMm  the shaft/pillar diameter this tip grows from.
  */
 export function synthTipSettings(tip: CbxTip, shaftMm: number): any {
-  const authoredBody = Number.isFinite(tip.bodyDiameter) && tip.bodyDiameter > 0
-    ? tip.bodyDiameter
-    : undefined;
-  const cappedBody = authoredBody !== undefined
-    ? Math.min(authoredBody, shaftMm)
-    : undefined;
   return {
     length: Number.isFinite(tip.length) && tip.length > 0 ? tip.length : undefined,
-    diameter: cappedBody,
+    diameter: shaftMm,
     pointDiameter: Number.isFinite(tip.contactDiameter) ? tip.contactDiameter : undefined,
   };
 }
@@ -106,8 +102,9 @@ export function buildTipFromKnot(
 
   // For a branch, the cone is the SHORT native tip (it sits at the model end of a
   // shaft). For a leaf, the cone spans the whole authored distance from the knot.
+  // Body diameter follows the shaft (see synthTipSettings) in both cases.
   const tipSettingsForCone = asBranch
-    ? { length: nativeTipLen, diameter: Math.min(tip.bodyDiameter || shaftDiameter, shaftDiameter), pointDiameter: tip.contactDiameter }
+    ? { length: nativeTipLen, diameter: shaftDiameter, pointDiameter: tip.contactDiameter }
     : synthTipSettings(tip, shaftDiameter);
 
   const assembly = createContactAssembly(

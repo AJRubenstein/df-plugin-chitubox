@@ -152,30 +152,47 @@ export interface KnotCenteringInput {
  *  only genuinely-clustered knots merge, loose enough to catch authored scatter. */
 const KNOT_CLUSTER_T_TOL = 0.08;
 
+/** Result of {@link centerCoincidentKnots}. */
+export interface KnotCenteringResult {
+  /** Number of surviving knots whose position/t was snapped onto the cluster anchor. */
+  moved: number;
+  /** Number of duplicate brace-only knots removed (merged into a cluster survivor). */
+  merged: number;
+  /**
+   * Old knot id -> surviving knot id, for every knot removed by the merge. The
+   * caller must rewrite any Brace.startKnotId/endKnotId that names a key here to
+   * the mapped value (braceKnotIds is exactly that reference set).
+   */
+  idRemap: Map<string, string>;
+}
+
 /**
- * Resolve clusters of near-coincident knots on the same shaft to a single shared
- * spot, WITHOUT merging them (every knot is preserved so its brace/branch/leaf
- * linkage stays intact). Chitubox frequently lands several braces at almost the
- * same height on one shaft, each authoring its own knot a fraction of a millimetre
- * apart; left scattered, the host renders a little fan of attach points and the
- * resulting overhang support is messier than it needs to be. Snapping the cluster
- * to one position on the shaft gives the cleaner single-attach result the user sees
- * in Chitubox.
+ * Resolve clusters of near-coincident knots on the same shaft down to a single
+ * shared knot. Chitubox frequently lands several braces at almost the same height
+ * on one shaft, each authoring its own knot a fraction of a millimetre apart; left
+ * as separate knots, the host renders a little fan of overlapping attach points
+ * (each with its own independently-tracked diameter, so they can drift out of sync
+ * on a later diameter edit) instead of the single clean attachment Chitubox shows.
+ *
+ * The host's data model already supports many entities (braces, branches, leaves)
+ * referencing one shared Knot.id, so the fix is a real merge: every brace-only
+ * knot in a cluster collapses onto one survivor, which the caller re-points all
+ * matching Brace.startKnotId/endKnotId references onto.
  *
  * Rules, deliberately conservative:
- *  - Only BRACE-only knots are moved. A knot that anchors a leaf or branch (a real
- *    model contact) is never repositioned — moving it could drag a tip off the
- *    model — but it MAY serve as the anchor the braces snap onto.
+ *  - Only BRACE-only knots are merged. A knot that anchors a leaf or branch (a real
+ *    model contact) is never moved or merged away — moving it could drag a tip off
+ *    the model — but it MAY serve as the anchor the brace-only knots snap onto.
  *  - Clustering is by parentShaftId + parametric t (matching the host's own
  *    coincidence test), not 3D distance, so knots on a short/near-horizontal shaft
  *    that are far apart along it are not wrongly merged.
  *  - The shared spot is the contact knot's position if the cluster has one, else
  *    the mean of the brace members — so braces gather onto the real support where
  *    one exists.
- *
- * Returns the number of knots repositioned (for debug logging).
+ *  - The survivor is the lowest-t brace-only member of the cluster (deterministic);
+ *    the rest are removed from `knots` and mapped onto it in `idRemap`.
  */
-export function centerCoincidentKnots(input: KnotCenteringInput): number {
+export function centerCoincidentKnots(input: KnotCenteringInput): KnotCenteringResult {
   const { knots, braceKnotIds, contactKnotIds } = input;
 
   // Group knots that have a shaft + a defined t by their shaft.
@@ -188,6 +205,9 @@ export function centerCoincidentKnots(input: KnotCenteringInput): number {
   }
 
   let moved = 0;
+  let merged = 0;
+  const idRemap = new Map<string, string>();
+  const removeIds = new Set<string>();
   for (const list of byShaft.values()) {
     list.sort((a, b) => (a.t as number) - (b.t as number));
     const used = new Set<number>();
@@ -245,9 +265,28 @@ export function centerCoincidentKnots(input: KnotCenteringInput): number {
           moved++;
         }
       }
+
+      // Collapse the brace-only members onto one survivor (lowest t, i.e. the
+      // first of the group — deterministic). The rest are dropped from `knots`
+      // and mapped so the caller can re-point their brace references onto it.
+      const [survivor, ...duplicates] = braceMembers;
+      for (const dup of duplicates) {
+        idRemap.set(dup.id, survivor.id);
+        removeIds.add(dup.id);
+        merged++;
+      }
     }
   }
-  return moved;
+
+  if (removeIds.size > 0) {
+    let w = 0;
+    for (let r = 0; r < knots.length; r++) {
+      if (!removeIds.has(knots[r].id)) knots[w++] = knots[r];
+    }
+    knots.length = w;
+  }
+
+  return { moved, merged, idRemap };
 }
 
 /** Minimal joint shape for the collapse pass. */
