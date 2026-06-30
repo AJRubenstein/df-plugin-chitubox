@@ -731,6 +731,7 @@ export class CbxConverter {
     // to that knot (a branch off the brace network) — and drop the floating root so
     // the host no longer tries to ground it.
     let forksReanchored = 0;
+    let forksRedirectedToPartner = 0;
     if (forkJunctionTrunks.length > 0) {
       const droppedRootIds = new Set<string>();
       // Knots that a brace attaches to (the convergence knots we want to anchor onto).
@@ -739,6 +740,14 @@ export class CbxConverter {
         if (br.startKnotId) braceKnotIds.add(br.startKnotId);
         if (br.endKnotId) braceKnotIds.add(br.endKnotId);
       }
+      // Find the ShaftRef (built earlier per support) that owns a given segment id,
+      // used below to re-host a convergence knot onto the OTHER pillar's shaft.
+      const findShaftRefForSegment = (segmentId: string): ShaftRef | null => {
+        for (const ref of shaftRefs) {
+          if (ref.segments.some((s) => s.segmentId === segmentId)) return ref;
+        }
+        return null;
+      };
       for (const fork of forkJunctionTrunks) {
         // Anchor onto the nearest BRACE-convergence knot at the fork base. We key off
         // "a brace references this knot" rather than shaft ownership, because the
@@ -754,13 +763,50 @@ export class CbxConverter {
         // Only re-anchor if a convergence knot is genuinely at the base (within 2mm).
         if (!best || bestD > 2.0) continue;
 
+        // The nearest-knot search above is keyed only on "a brace references this
+        // knot", not on which shaft hosts it — so it almost always finds the LOCAL
+        // knot the converging brace dropped on the fork's OWN base segment (it's
+        // trivially the closest possible point to itself), not the genuine knot on
+        // the OTHER pillar the brace actually connects to. Anchoring directly to that
+        // local knot makes the branch its own parent: a self-reference that the
+        // host's trunk-resolution walk can never escape (it renders fine — preserved
+        // knots draw at their authored position regardless — but never resolves to a
+        // trunk, so editing/selection logic that walks the parent chain breaks).
+        // When the chosen knot is self-hosted, follow its brace to the other endpoint
+        // and re-host a NEW knot at the SAME convergence position onto that external
+        // shaft instead — same geometry, but a parent chain that actually leads
+        // somewhere.
+        let anchorKnot = best;
+        const isSelfHosted = fork.trunk.segments.some((s) => s.id === best!.parentShaftId);
+        if (isSelfHosted) {
+          const hostBrace = braces.find((br) => br.startKnotId === best!.id || br.endKnotId === best!.id);
+          const partnerId = hostBrace
+            ? (hostBrace.startKnotId === best!.id ? hostBrace.endKnotId : hostBrace.startKnotId)
+            : null;
+          const partner = partnerId ? knots.find((k) => k.id === partnerId) : null;
+          const partnerShaftRef = partner ? findShaftRefForSegment(partner.parentShaftId) : null;
+          if (partnerShaftRef) {
+            const proj = projectToShaft(partnerShaftRef, best.pos);
+            anchorKnot = {
+              id: generateUuid(),
+              parentShaftId: proj.segmentId,
+              t: proj.t,
+              pos: { ...best.pos },
+              diameter: best.diameter,
+              _importHint: 'preserve',
+            };
+            knots.push(anchorKnot);
+            forksRedirectedToPartner++;
+          }
+        }
+
         // Re-parent the trunk's bottom segment to the convergence knot: set its
         // bottomJoint to a joint at the knot so the shaft starts from the convergence.
         const bottomSeg = fork.trunk.segments[0];
         bottomSeg.bottomJoint = {
           id: generateUuid(),
-          pos: { x: best.pos.x, y: best.pos.y, z: best.pos.z },
-          diameter: best.diameter ?? getJointDiameter(bottomSeg.diameter),
+          pos: { x: anchorKnot.pos.x, y: anchorKnot.pos.y, z: anchorKnot.pos.z },
+          diameter: anchorKnot.diameter ?? getJointDiameter(bottomSeg.diameter),
         };
         // Emit the fork as a BRANCH (parented to the convergence knot), not a trunk.
         // The host routes every trunk through SmartPlacementV2, which always grounds
@@ -771,7 +817,7 @@ export class CbxConverter {
           id: fork.trunk.id,
           modelId: fork.trunk.modelId,
           importSourceLabel: fork.trunk.importSourceLabel,
-          parentKnotId: best.id,
+          parentKnotId: anchorKnot.id,
           segments: fork.trunk.segments,
           contactCone: fork.trunk.contactCone,
         };
@@ -791,6 +837,7 @@ export class CbxConverter {
       console.log(`${LOG_PREFIX} fork junctions`, {
         total: forkJunctionTrunks.length,
         reanchored: forksReanchored,
+        redirectedToPartnerShaft: forksRedirectedToPartner,
         rootsDropped: droppedRootIds.size,
       });
     }
@@ -1133,12 +1180,12 @@ export class CbxConverter {
       }
     }
 
-    // --- Knot-centering sanity pass ----------------------------------------
-    // Resolve clusters of near-coincident brace knots on the same shaft to one
-    // shared spot (without merging them), so authored brace scatter doesn't leave a
-    // fan of attach points that makes the host's overhang support messier than the
-    // single clean attachment seen in Chitubox. Contact (leaf/branch) knots are used
-    // as anchors but never moved.
+    // --- Knot-centering / merge sanity pass ---------------------------------
+    // Resolve clusters of near-coincident brace knots on the same shaft down to one
+    // shared knot, so authored brace scatter doesn't leave a fan of attach points
+    // (each independently tracking its own diameter and able to drift out of sync
+    // on a later edit) where the host renders a single clean attachment in Chitubox.
+    // Contact (leaf/branch) knots are used as anchors but never moved or merged away.
     {
       const braceKnotIds = new Set<string>();
       for (const br of braces) {
@@ -1152,9 +1199,20 @@ export class CbxConverter {
       for (const lf of leaves) {
         if (lf.parentKnotId) contactKnotIds.add(lf.parentKnotId);
       }
-      const movedKnots = centerCoincidentKnots({ knots, braceKnotIds, contactKnotIds });
+      const { moved: movedKnots, merged: mergedKnots, idRemap } = centerCoincidentKnots({ knots, braceKnotIds, contactKnotIds });
+      if (idRemap.size > 0) {
+        for (const br of braces) {
+          const remappedStart = idRemap.get(br.startKnotId);
+          if (remappedStart) br.startKnotId = remappedStart;
+          const remappedEnd = idRemap.get(br.endKnotId);
+          if (remappedEnd) br.endKnotId = remappedEnd;
+        }
+      }
       if (CBX_DEBUG && movedKnots > 0) {
         cbxDebug(`knot-centering pass: resolved ${movedKnots} coincident brace knot(s) onto shared shaft spots`);
+      }
+      if (CBX_DEBUG && mergedKnots > 0) {
+        cbxDebug(`knot-merge pass: merged ${mergedKnots} duplicate brace knot(s) into shared knot ids`);
       }
     }
 
