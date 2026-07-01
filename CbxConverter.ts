@@ -996,10 +996,16 @@ export class CbxConverter {
       [0, 1, 1], [0, -1, 1], [0, 1, -1], [0, -1, -1],
     ];
     const PROBE_BACKOFF_MM = 0.4;
-    const recoverSurfaceNormal = (contact: Vec3, _towardOther: Vec3, fallback: Vec3): Vec3 => {
-      if (!mesh) return fallback;
+    // Returns the outward surface normal AND the snapped surface position (the
+    // actual mesh hit point). The authored CBX twig endpoint can sit a fraction
+    // of a mm off the mesh surface; snapping to the hit position — the same
+    // technique createContactAssembly uses for tip contacts — ensures the disk
+    // face is flush with the model surface rather than floating below it.
+    const recoverSurfaceContact = (contact: Vec3, _towardOther: Vec3, fallback: Vec3): { normal: Vec3; surfacePos: Vec3 | null } => {
+      if (!mesh) return { normal: fallback, surfacePos: null };
       const raycaster = new THREE.Raycaster();
       let bestNormal: THREE.Vector3 | null = null;
+      let bestSurfacePos: THREE.Vector3 | null = null;
       let bestErr = Infinity;
       const origin = new THREE.Vector3();
       for (const d of PROBE_DIRS) {
@@ -1014,17 +1020,25 @@ export class CbxConverter {
         if (err < bestErr) {
           bestErr = err;
           bestNormal = hits[0].face.normal.clone().transformDirection(mesh.matrixWorld).normalize();
+          bestSurfacePos = hits[0].point.clone();
         }
       }
-      if (!bestNormal) return fallback;
+      if (!bestNormal) return { normal: fallback, surfacePos: null };
       // Orient OUTWARD: a point a small stand-off along +n must be OUTSIDE the model.
+      // Use the snapped surface position for the probe so the orientation test is
+      // accurate even when the authored contact is slightly off the mesh surface.
+      const probeOrigin = bestSurfacePos ?? new THREE.Vector3(contact.x, contact.y, contact.z);
       const probe = new THREE.Vector3(
-        contact.x + bestNormal.x * STANDOFF_PROBE_MM,
-        contact.y + bestNormal.y * STANDOFF_PROBE_MM,
-        contact.z + bestNormal.z * STANDOFF_PROBE_MM,
+        probeOrigin.x + bestNormal.x * STANDOFF_PROBE_MM,
+        probeOrigin.y + bestNormal.y * STANDOFF_PROBE_MM,
+        probeOrigin.z + bestNormal.z * STANDOFF_PROBE_MM,
       );
       if (pointInsideModel(probe)) bestNormal.multiplyScalar(-1);
-      return { x: bestNormal.x, y: bestNormal.y, z: bestNormal.z };
+      const normal: Vec3 = { x: bestNormal.x, y: bestNormal.y, z: bestNormal.z };
+      const surfacePos: Vec3 | null = bestSurfacePos
+        ? { x: bestSurfacePos.x, y: bestSurfacePos.y, z: bestSurfacePos.z }
+        : null;
+      return { normal, surfacePos };
     };
 
     for (const t of modelTwigs) {
@@ -1038,9 +1052,15 @@ export class CbxConverter {
       const axisA = normalizeVec({ x: posB.x - posA.x, y: posB.y - posA.y, z: posB.z - posA.z });
       const axisB = { x: -axisA.x, y: -axisA.y, z: -axisA.z };
 
-      // Real surface normals at each end (fallback: the strut axis, pointing out).
-      const normalA = recoverSurfaceNormal(posA, posB, axisB);
-      const normalB = recoverSurfaceNormal(posB, posA, axisA);
+      // Real surface normals + snapped contact positions at each end. The authored
+      // CBX endpoint can sit slightly off the mesh; using the raycast hit position
+      // (same as createContactAssembly does for tip contacts) closes any gap.
+      const contactA = recoverSurfaceContact(posA, posB, axisB);
+      const contactB = recoverSurfaceContact(posB, posA, axisA);
+      const normalA = contactA.normal;
+      const normalB = contactB.normal;
+      const effectivePosA = contactA.surfacePos ?? posA;
+      const effectivePosB = contactB.surfacePos ?? posB;
 
       // Minimal disk-type profile — EXACTLY the host ContactDiskProfile shape
       // (type + diskThicknessMm + maxStandoffMm + standoffAngleThreshold). No tip
@@ -1068,20 +1088,21 @@ export class CbxConverter {
       const thicknessB = standoff(normalB, axisB, jointDiameterB, profB);
 
       // Joints sit OFF the surface along each surface normal (like the host).
+      // Use the snapped surface positions so the joint follows the corrected contact.
       const jointPosA: Vec3 = {
-        x: posA.x + normalA.x * thicknessA,
-        y: posA.y + normalA.y * thicknessA,
-        z: posA.z + normalA.z * thicknessA,
+        x: effectivePosA.x + normalA.x * thicknessA,
+        y: effectivePosA.y + normalA.y * thicknessA,
+        z: effectivePosA.z + normalA.z * thicknessA,
       };
       const jointPosB: Vec3 = {
-        x: posB.x + normalB.x * thicknessB,
-        y: posB.y + normalB.y * thicknessB,
-        z: posB.z + normalB.z * thicknessB,
+        x: effectivePosB.x + normalB.x * thicknessB,
+        y: effectivePosB.y + normalB.y * thicknessB,
+        z: effectivePosB.z + normalB.z * thicknessB,
       };
 
       const diskA: ContactDisk = {
         id: generateUuid(),
-        pos: posA,
+        pos: effectivePosA,
         surfaceNormal: normalA,
         coneAxis: axisA,
         diskLengthOverride: thicknessA,
@@ -1090,7 +1111,7 @@ export class CbxConverter {
       };
       const diskB: ContactDisk = {
         id: generateUuid(),
-        pos: posB,
+        pos: effectivePosB,
         surfaceNormal: normalB,
         coneAxis: axisB,
         diskLengthOverride: thicknessB,
