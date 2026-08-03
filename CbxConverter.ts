@@ -19,7 +19,7 @@ import { calculateDiskThickness } from '@/supports/SupportPrimitives/ContactDisk
 import { recomputeLeafContactConeAxisAndLength } from '@/supports/state';
 import { ContactCone } from '@/supports/SupportPrimitives/ContactCone/types';
 import { createContactAssembly } from './converter/contactAssembly';
-import { generateUuid } from '@/utils/uuid';
+import { v4 as uuidv4 } from 'uuid';
 
 /**
  * Converts parsed Cbx supports (CHAIN model) into DragonFruit's import
@@ -160,7 +160,7 @@ function buildSupport(
   const knotCenter = z(s.knotCenterZ);
 
   // --- Roots: from authored base pad if present, else a settings-sized pad. ---
-  const rootId = generateUuid();
+  const rootId = uuidv4();
   let root: Roots;
   if (s.isForkJunction) {
     // Fork junction: the pillar's base is mid-air at a brace convergence, held up
@@ -201,7 +201,7 @@ function buildSupport(
 
   // --- Knot joint: authored center Z + authored sphere diameter. ---
   const knotJoint: Joint = {
-    id: generateUuid(),
+    id: uuidv4(),
     pos: { x: px, y: py, z: knotCenter },
     diameter: Number.isFinite(s.knotDiameter) && s.knotDiameter > 0
       ? s.knotDiameter
@@ -218,14 +218,14 @@ function buildSupport(
 
   if (!hasModelTip) {
     const soloSegment: Segment = {
-      id: generateUuid(),
+      id: uuidv4(),
       type: 'straight',
       diameter: shaftDiameter,
       bottomJoint: undefined, // on Root
       topJoint: knotJoint,
     };
     const trunk: Trunk = {
-      id: generateUuid(),
+      id: uuidv4(),
       modelId,
       rootId,
       baseDiameterMm: shaftDiameter,
@@ -273,17 +273,17 @@ function buildSupport(
     const maxJointZ = socketZ - MIN_TRANSITION_SEG_MM;
     const jointZ = Math.max(minJointZ, Math.min(knotCenter, maxJointZ));
     const joint0: Joint = {
-      id: generateUuid(),
+      id: uuidv4(),
       pos: { x: px, y: py, z: jointZ },
       diameter: knotJointDiameter,
     };
     segments.push(
-      { id: generateUuid(), type: 'straight', diameter: shaftDiameter, bottomJoint: undefined, topJoint: joint0 },
-      { id: generateUuid(), type: 'straight', diameter: shaftDiameter, bottomJoint: joint0, topJoint: primary.socketJoint },
+      { id: uuidv4(), type: 'straight', diameter: shaftDiameter, bottomJoint: undefined, topJoint: joint0 },
+      { id: uuidv4(), type: 'straight', diameter: shaftDiameter, bottomJoint: joint0, topJoint: primary.socketJoint },
     );
   } else {
     segments.push({
-      id: generateUuid(),
+      id: uuidv4(),
       type: 'straight',
       diameter: shaftDiameter,
       bottomJoint: undefined, // on Root
@@ -292,7 +292,7 @@ function buildSupport(
   }
 
   const trunk: Trunk = {
-    id: generateUuid(),
+    id: uuidv4(),
     modelId,
     rootId,
     baseDiameterMm: shaftDiameter,
@@ -318,7 +318,7 @@ function buildSupport(
     const knotZ = Math.max(segBotZ + 0.05, Math.min(knotCenter, segTopZ - 0.05));
     const sharedKnotPos: Vec3 = { x: px, y: py, z: knotZ };
     const sharedKnot: Knot = {
-      id: generateUuid(),
+      id: uuidv4(),
       parentShaftId: topSegment.id,
       pos: sharedKnotPos,
       diameter: getJointDiameter(shaftDiameter),
@@ -404,7 +404,7 @@ export class CbxConverter {
     settings?: SupportSettings,
     mesh?: THREE.Mesh,
   ): DragonfruitImportFormat {
-    const placeholderModelId = generateUuid();
+    const placeholderModelId = uuidv4();
     const supports = model.supports ?? [];
 
     const tipDefaults = resolveTipDefaults(settings);
@@ -625,7 +625,7 @@ export class CbxConverter {
       const projB = projectToShaft(shaftB, endpointB);
 
       const knotA: Knot = {
-        id: generateUuid(),
+        id: uuidv4(),
         parentShaftId: projA.segmentId,
         t: projA.t,
         pos: endpointA,
@@ -633,7 +633,7 @@ export class CbxConverter {
         _importHint: 'braceImported',
       };
       const knotB: Knot = {
-        id: generateUuid(),
+        id: uuidv4(),
         parentShaftId: projB.segmentId,
         t: projB.t,
         pos: endpointB,
@@ -643,7 +643,7 @@ export class CbxConverter {
       knots.push(knotA, knotB);
 
       braces.push({
-        id: generateUuid(),
+        id: uuidv4(),
         modelId: placeholderModelId,
         startKnotId: knotA.id,
         endKnotId: knotB.id,
@@ -682,7 +682,7 @@ export class CbxConverter {
       const jointDiameter = getJointDiameter(pb.diameter);
 
       const knotTarget: Knot = {
-        id: generateUuid(),
+        id: uuidv4(),
         parentShaftId: projTarget.segmentId,
         t: projTarget.t,
         pos: projTarget.pos,
@@ -690,7 +690,7 @@ export class CbxConverter {
         _importHint: 'braceImported',
       };
       const knotSource: Knot = {
-        id: generateUuid(),
+        id: uuidv4(),
         parentShaftId: projSource.segmentId,
         t: projSource.t,
         pos: projSource.pos,
@@ -699,7 +699,7 @@ export class CbxConverter {
       };
       knots.push(knotTarget, knotSource);
       braces.push({
-        id: generateUuid(),
+        id: uuidv4(),
         modelId: placeholderModelId,
         startKnotId: knotSource.id,
         endKnotId: knotTarget.id,
@@ -781,7 +781,7 @@ export class CbxConverter {
           if (partnerShaftRef) {
             const proj = projectToShaft(partnerShaftRef, best.pos);
             anchorKnot = {
-              id: generateUuid(),
+              id: uuidv4(),
               parentShaftId: proj.segmentId,
               t: proj.t,
               pos: { ...best.pos },
@@ -797,7 +797,7 @@ export class CbxConverter {
         // bottomJoint to a joint at the knot so the shaft starts from the convergence.
         const bottomSeg = fork.trunk.segments[0];
         bottomSeg.bottomJoint = {
-          id: generateUuid(),
+          id: uuidv4(),
           pos: { x: anchorKnot.pos.x, y: anchorKnot.pos.y, z: anchorKnot.pos.z },
           diameter: anchorKnot.diameter ?? getJointDiameter(bottomSeg.diameter),
         };
@@ -860,7 +860,7 @@ export class CbxConverter {
       if (!parentRef) { junctionDropped++; continue; }
       const proj = projectToShaft(parentRef, parentPos);
       const parentKnot: Knot = {
-        id: generateUuid(),
+        id: uuidv4(),
         parentShaftId: proj.segmentId,
         t: proj.t,
         pos: parentPos,
@@ -879,19 +879,19 @@ export class CbxConverter {
       // simply carries the load up to the junction knot, and the tips hang off it as
       // leaves, exactly as DF would if the junction had been hand-placed.
       const junctionTerminalJoint: Joint = {
-        id: generateUuid(),
+        id: uuidv4(),
         pos: junctionPos,
         diameter: getJointDiameter(shaftDiameter),
       };
       const branchSeg: Segment = {
-        id: generateUuid(),
+        id: uuidv4(),
         type: 'straight',
         diameter: shaftDiameter,
         bottomJoint: undefined, // connects to the parent knot
         topJoint: junctionTerminalJoint,
       };
       const junctionBranch: Branch = {
-        id: generateUuid(),
+        id: uuidv4(),
         modelId: placeholderModelId,
         parentKnotId: parentKnot.id,
         segments: [branchSeg],
@@ -909,7 +909,7 @@ export class CbxConverter {
       // Clone the position so each structure owns its own pos (matches the working
       // multi-tip trunk path, which builds a fresh sharedKnotPos for its knot).
       const junctionKnot: Knot = {
-        id: generateUuid(),
+        id: uuidv4(),
         parentShaftId: branchSeg.id,
         pos: { x: junctionPos.x, y: junctionPos.y, z: junctionPos.z },
         diameter: getJointDiameter(shaftDiameter),
@@ -1101,7 +1101,7 @@ export class CbxConverter {
       };
 
       const diskA: ContactDisk = {
-        id: generateUuid(),
+        id: uuidv4(),
         pos: effectivePosA,
         surfaceNormal: normalA,
         coneAxis: axisA,
@@ -1110,7 +1110,7 @@ export class CbxConverter {
         contactDiameterMm: contactDiameter,
       };
       const diskB: ContactDisk = {
-        id: generateUuid(),
+        id: uuidv4(),
         pos: effectivePosB,
         surfaceNormal: normalB,
         coneAxis: axisB,
@@ -1120,15 +1120,15 @@ export class CbxConverter {
       };
 
       twigs.push({
-        id: generateUuid(),
+        id: uuidv4(),
         modelId: placeholderModelId,
         segments: [
           {
-            id: generateUuid(),
+            id: uuidv4(),
             type: 'straight',
             diameter: contactDiameter, // legacy uniform value (taper carried by joints)
-            bottomJoint: { id: generateUuid(), pos: jointPosA, diameter: jointDiameterA },
-            topJoint: { id: generateUuid(), pos: jointPosB, diameter: jointDiameterB },
+            bottomJoint: { id: uuidv4(), pos: jointPosA, diameter: jointDiameterA },
+            topJoint: { id: uuidv4(), pos: jointPosB, diameter: jointDiameterB },
           },
         ],
         contactDiskA: diskA,
@@ -1167,7 +1167,7 @@ export class CbxConverter {
           ? Math.max((cc.profile as any).bodyDiameterMm, 0.8)
           : 0.8;
         const assembly = createContactAssembly(
-          { id: generateUuid(), base: { x: knot.pos.x, y: knot.pos.y, z: knot.pos.z }, tip: { x: cc.pos.x, y: cc.pos.y, z: cc.pos.z } },
+          { id: uuidv4(), base: { x: knot.pos.x, y: knot.pos.y, z: knot.pos.z }, tip: { x: cc.pos.x, y: cc.pos.y, z: cc.pos.z } },
           new THREE.Vector3(cc.pos.x, cc.pos.y, cc.pos.z),
           knot.pos,
           { length: tipLen, diameter: CBX_TIP_DEFAULTS.bodyDiameterMm, pointDiameter: CBX_TIP_DEFAULTS.contactDiameterMm },
@@ -1176,11 +1176,11 @@ export class CbxConverter {
           false, false, null, true,
         );
         branches.push({
-          id: generateUuid(),
+          id: uuidv4(),
           modelId: leaf.modelId,
           parentKnotId: knot.id,
           segments: [
-            { id: generateUuid(), type: 'straight', diameter: shaftDia, bottomJoint: undefined, topJoint: assembly.socketJoint },
+            { id: uuidv4(), type: 'straight', diameter: shaftDia, bottomJoint: undefined, topJoint: assembly.socketJoint },
           ],
           contactCone: assembly.contactCone,
         });

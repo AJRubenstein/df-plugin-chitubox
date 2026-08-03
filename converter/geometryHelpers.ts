@@ -10,7 +10,7 @@ import { getJointDiameter } from '@/supports/constants';
 import { recomputeLeafContactConeAxisAndLength } from '@/supports/state';
 import { ContactCone } from '@/supports/SupportPrimitives/ContactCone/types';
 import { createContactAssembly } from './contactAssembly';
-import { generateUuid } from '@/utils/uuid';
+import { v4 as uuidv4 } from 'uuid';
 import { CbxTip, CbxTipDefaults, CBX_TIP_DEFAULTS, CBX_DEBUG, cbxDebug } from './types';
 
 export function normalizeVec(v: Vec3): Vec3 {
@@ -134,7 +134,7 @@ export function buildTipFromKnot(
         + `knotToContact=${knotToContact.toFixed(2)} shaftLength=${shaftLength.toFixed(2)} coneLen=${(cone.profile.lengthMm ?? 0).toFixed(2)}`,
       );
     }
-    return { leaf: { id: generateUuid(), modelId, parentKnotId: knot.id, contactCone: cone } };
+    return { leaf: { id: uuidv4(), modelId, parentKnotId: knot.id, contactCone: cone } };
   }
 
   if (CBX_DEBUG) {
@@ -153,12 +153,12 @@ export function buildTipFromKnot(
   // follows knot → cone socket; the cone keeps its own socket joint.
   return {
     branch: {
-      id: generateUuid(),
+      id: uuidv4(),
       modelId,
       parentKnotId: knot.id,
       segments: [
         {
-          id: generateUuid(),
+          id: uuidv4(),
           type: 'straight',
           diameter: shaftDiameter,
           bottomJoint: undefined, // connects to the parent knot
@@ -218,7 +218,7 @@ export function buildNativeBranch(
   );
 
   const segment: Segment = {
-    id: generateUuid(),
+    id: uuidv4(),
     type: 'straight',
     diameter: shaftDiameter,
     bottomJoint: undefined, // connects to the parent knot
@@ -241,7 +241,7 @@ export function buildNativeBranch(
   }
 
   return {
-    id: generateUuid(),
+    id: uuidv4(),
     modelId,
     parentKnotId: parentKnot.id,
     segments: [segment],
@@ -309,12 +309,12 @@ export function applyTrunkDiameterProfile(
 
     // Split: a new joint at the knot, lower seg [start→knot], upper seg [knot→end].
     const splitJoint: Joint = {
-      id: generateUuid(),
+      id: uuidv4(),
       pos: { x: knot.pos.x, y: knot.pos.y, z: knot.pos.z },
       diameter: seg.diameter, // refined below
     };
-    const lowerSeg: Segment = { id: generateUuid(), type: 'straight', diameter: seg.diameter, bottomJoint: seg.bottomJoint, topJoint: splitJoint };
-    const upperSeg: Segment = { id: generateUuid(), type: 'straight', diameter: seg.diameter, bottomJoint: splitJoint, topJoint: seg.topJoint };
+    const lowerSeg: Segment = { id: uuidv4(), type: 'straight', diameter: seg.diameter, bottomJoint: seg.bottomJoint, topJoint: splitJoint };
+    const upperSeg: Segment = { id: uuidv4(), type: 'straight', diameter: seg.diameter, bottomJoint: splitJoint, topJoint: seg.topJoint };
     trunk.segments.splice(segIdx, 1, lowerSeg, upperSeg);
     // Anchor this knot (and any other knots on the old segment) to the correct side.
     for (const k of knots) {
