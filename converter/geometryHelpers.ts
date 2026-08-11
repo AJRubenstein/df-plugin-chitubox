@@ -10,7 +10,7 @@ import { getJointDiameter } from '@/supports/constants';
 import { recomputeLeafContactConeAxisAndLength } from '@/supports/state';
 import { ContactCone } from '@/supports/SupportPrimitives/ContactCone/types';
 import { createContactAssembly } from './contactAssembly';
-import { generateUuid } from '@/utils/uuid';
+import { v4 as uuidv4 } from 'uuid';
 import { CbxTip, CbxTipDefaults, CBX_TIP_DEFAULTS, CBX_DEBUG, cbxDebug } from './types';
 
 export function normalizeVec(v: Vec3): Vec3 {
@@ -37,29 +37,25 @@ export function synthSupportForTip(tip: CbxTip, attachPos: Vec3): any {
  * tipSettings for createContactAssembly.
  *   length        ← authored cone length.
  *   pointDiameter ← AUTHORED contactDiameter (the model footprint). Never defaulted.
- *   diameter      ← AUTHORED bodyDiameter (Cbx `pb`, the connection cone's LOWER /
- *                   pillar-end diameter), capped at the shaft so it never overhangs.
+ *   diameter      ← the SHAFT diameter this tip grows from, not the authored Cbx
+ *                   bodyDiameter (`pb`).
  *
- * The Chitubox "Connection" cone tapers from the contact (upper) to a lower/pillar
- * diameter (`pb`). That lower diameter is the authored body and must be preserved —
- * it's often NARROWER than the shaft (e.g. a 0.80 shaft with a 0.50 connection),
- * giving the slim spike look. Forcing a native body (≥1.0) fattened these into
- * bulbs. We do cap at the shaft diameter so a body authored WIDER than its shaft
- * (some models) can't overhang the knot — min(authored, shaft) is slim where Chitu
- * is slim and never wider than the pillar it grows from.
+ * Cbx's "Connection" cone tapers from the contact (upper) to a lower/pillar
+ * diameter (`pb`) that's often narrower than the shaft (e.g. a 0.80 shaft with a
+ * 0.50 connection) — imported verbatim that reads as a fat joint ball necking down
+ * to a thin spike, since the engine sizes the socket JOINT to the shaft diameter
+ * (see applyTrunkDiameterProfile) independently of the cone's own body diameter.
+ * Matching the native DF behaviour (editing shaft diameter syncs tip body diameter
+ * to it, see updateShaftProfile) keeps the cone body flush with the shaft it grows
+ * from, which is the look the host produces by default and what a settings-dialog
+ * round-trip already converges imports to.
  *
- * @param shaftMm  the shaft/pillar diameter this tip grows from (the overhang cap).
+ * @param shaftMm  the shaft/pillar diameter this tip grows from.
  */
 export function synthTipSettings(tip: CbxTip, shaftMm: number): any {
-  const authoredBody = Number.isFinite(tip.bodyDiameter) && tip.bodyDiameter > 0
-    ? tip.bodyDiameter
-    : undefined;
-  const cappedBody = authoredBody !== undefined
-    ? Math.min(authoredBody, shaftMm)
-    : undefined;
   return {
     length: Number.isFinite(tip.length) && tip.length > 0 ? tip.length : undefined,
-    diameter: cappedBody,
+    diameter: shaftMm,
     pointDiameter: Number.isFinite(tip.contactDiameter) ? tip.contactDiameter : undefined,
   };
 }
@@ -106,8 +102,9 @@ export function buildTipFromKnot(
 
   // For a branch, the cone is the SHORT native tip (it sits at the model end of a
   // shaft). For a leaf, the cone spans the whole authored distance from the knot.
+  // Body diameter follows the shaft (see synthTipSettings) in both cases.
   const tipSettingsForCone = asBranch
-    ? { length: nativeTipLen, diameter: Math.min(tip.bodyDiameter || shaftDiameter, shaftDiameter), pointDiameter: tip.contactDiameter }
+    ? { length: nativeTipLen, diameter: shaftDiameter, pointDiameter: tip.contactDiameter }
     : synthTipSettings(tip, shaftDiameter);
 
   const assembly = createContactAssembly(
@@ -137,7 +134,7 @@ export function buildTipFromKnot(
         + `knotToContact=${knotToContact.toFixed(2)} shaftLength=${shaftLength.toFixed(2)} coneLen=${(cone.profile.lengthMm ?? 0).toFixed(2)}`,
       );
     }
-    return { leaf: { id: generateUuid(), modelId, parentKnotId: knot.id, contactCone: cone } };
+    return { leaf: { id: uuidv4(), modelId, parentKnotId: knot.id, contactCone: cone } };
   }
 
   if (CBX_DEBUG) {
@@ -156,12 +153,12 @@ export function buildTipFromKnot(
   // follows knot → cone socket; the cone keeps its own socket joint.
   return {
     branch: {
-      id: generateUuid(),
+      id: uuidv4(),
       modelId,
       parentKnotId: knot.id,
       segments: [
         {
-          id: generateUuid(),
+          id: uuidv4(),
           type: 'straight',
           diameter: shaftDiameter,
           bottomJoint: undefined, // connects to the parent knot
@@ -221,7 +218,7 @@ export function buildNativeBranch(
   );
 
   const segment: Segment = {
-    id: generateUuid(),
+    id: uuidv4(),
     type: 'straight',
     diameter: shaftDiameter,
     bottomJoint: undefined, // connects to the parent knot
@@ -244,7 +241,7 @@ export function buildNativeBranch(
   }
 
   return {
-    id: generateUuid(),
+    id: uuidv4(),
     modelId,
     parentKnotId: parentKnot.id,
     segments: [segment],
@@ -312,12 +309,12 @@ export function applyTrunkDiameterProfile(
 
     // Split: a new joint at the knot, lower seg [start→knot], upper seg [knot→end].
     const splitJoint: Joint = {
-      id: generateUuid(),
+      id: uuidv4(),
       pos: { x: knot.pos.x, y: knot.pos.y, z: knot.pos.z },
       diameter: seg.diameter, // refined below
     };
-    const lowerSeg: Segment = { id: generateUuid(), type: 'straight', diameter: seg.diameter, bottomJoint: seg.bottomJoint, topJoint: splitJoint };
-    const upperSeg: Segment = { id: generateUuid(), type: 'straight', diameter: seg.diameter, bottomJoint: splitJoint, topJoint: seg.topJoint };
+    const lowerSeg: Segment = { id: uuidv4(), type: 'straight', diameter: seg.diameter, bottomJoint: seg.bottomJoint, topJoint: splitJoint };
+    const upperSeg: Segment = { id: uuidv4(), type: 'straight', diameter: seg.diameter, bottomJoint: splitJoint, topJoint: seg.topJoint };
     trunk.segments.splice(segIdx, 1, lowerSeg, upperSeg);
     // Anchor this knot (and any other knots on the old segment) to the correct side.
     for (const k of knots) {

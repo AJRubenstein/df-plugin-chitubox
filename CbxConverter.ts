@@ -19,7 +19,7 @@ import { calculateDiskThickness } from '@/supports/SupportPrimitives/ContactDisk
 import { recomputeLeafContactConeAxisAndLength } from '@/supports/state';
 import { ContactCone } from '@/supports/SupportPrimitives/ContactCone/types';
 import { createContactAssembly } from './converter/contactAssembly';
-import { generateUuid } from '@/utils/uuid';
+import { v4 as uuidv4 } from 'uuid';
 
 /**
  * Converts parsed Cbx supports (CHAIN model) into DragonFruit's import
@@ -160,7 +160,7 @@ function buildSupport(
   const knotCenter = z(s.knotCenterZ);
 
   // --- Roots: from authored base pad if present, else a settings-sized pad. ---
-  const rootId = generateUuid();
+  const rootId = uuidv4();
   let root: Roots;
   if (s.isForkJunction) {
     // Fork junction: the pillar's base is mid-air at a brace convergence, held up
@@ -201,7 +201,7 @@ function buildSupport(
 
   // --- Knot joint: authored center Z + authored sphere diameter. ---
   const knotJoint: Joint = {
-    id: generateUuid(),
+    id: uuidv4(),
     pos: { x: px, y: py, z: knotCenter },
     diameter: Number.isFinite(s.knotDiameter) && s.knotDiameter > 0
       ? s.knotDiameter
@@ -218,14 +218,14 @@ function buildSupport(
 
   if (!hasModelTip) {
     const soloSegment: Segment = {
-      id: generateUuid(),
+      id: uuidv4(),
       type: 'straight',
       diameter: shaftDiameter,
       bottomJoint: undefined, // on Root
       topJoint: knotJoint,
     };
     const trunk: Trunk = {
-      id: generateUuid(),
+      id: uuidv4(),
       modelId,
       rootId,
       baseDiameterMm: shaftDiameter,
@@ -273,17 +273,17 @@ function buildSupport(
     const maxJointZ = socketZ - MIN_TRANSITION_SEG_MM;
     const jointZ = Math.max(minJointZ, Math.min(knotCenter, maxJointZ));
     const joint0: Joint = {
-      id: generateUuid(),
+      id: uuidv4(),
       pos: { x: px, y: py, z: jointZ },
       diameter: knotJointDiameter,
     };
     segments.push(
-      { id: generateUuid(), type: 'straight', diameter: shaftDiameter, bottomJoint: undefined, topJoint: joint0 },
-      { id: generateUuid(), type: 'straight', diameter: shaftDiameter, bottomJoint: joint0, topJoint: primary.socketJoint },
+      { id: uuidv4(), type: 'straight', diameter: shaftDiameter, bottomJoint: undefined, topJoint: joint0 },
+      { id: uuidv4(), type: 'straight', diameter: shaftDiameter, bottomJoint: joint0, topJoint: primary.socketJoint },
     );
   } else {
     segments.push({
-      id: generateUuid(),
+      id: uuidv4(),
       type: 'straight',
       diameter: shaftDiameter,
       bottomJoint: undefined, // on Root
@@ -292,7 +292,7 @@ function buildSupport(
   }
 
   const trunk: Trunk = {
-    id: generateUuid(),
+    id: uuidv4(),
     modelId,
     rootId,
     baseDiameterMm: shaftDiameter,
@@ -318,7 +318,7 @@ function buildSupport(
     const knotZ = Math.max(segBotZ + 0.05, Math.min(knotCenter, segTopZ - 0.05));
     const sharedKnotPos: Vec3 = { x: px, y: py, z: knotZ };
     const sharedKnot: Knot = {
-      id: generateUuid(),
+      id: uuidv4(),
       parentShaftId: topSegment.id,
       pos: sharedKnotPos,
       diameter: getJointDiameter(shaftDiameter),
@@ -404,7 +404,7 @@ export class CbxConverter {
     settings?: SupportSettings,
     mesh?: THREE.Mesh,
   ): DragonfruitImportFormat {
-    const placeholderModelId = generateUuid();
+    const placeholderModelId = uuidv4();
     const supports = model.supports ?? [];
 
     const tipDefaults = resolveTipDefaults(settings);
@@ -625,7 +625,7 @@ export class CbxConverter {
       const projB = projectToShaft(shaftB, endpointB);
 
       const knotA: Knot = {
-        id: generateUuid(),
+        id: uuidv4(),
         parentShaftId: projA.segmentId,
         t: projA.t,
         pos: endpointA,
@@ -633,7 +633,7 @@ export class CbxConverter {
         _importHint: 'braceImported',
       };
       const knotB: Knot = {
-        id: generateUuid(),
+        id: uuidv4(),
         parentShaftId: projB.segmentId,
         t: projB.t,
         pos: endpointB,
@@ -643,7 +643,7 @@ export class CbxConverter {
       knots.push(knotA, knotB);
 
       braces.push({
-        id: generateUuid(),
+        id: uuidv4(),
         modelId: placeholderModelId,
         startKnotId: knotA.id,
         endKnotId: knotB.id,
@@ -682,7 +682,7 @@ export class CbxConverter {
       const jointDiameter = getJointDiameter(pb.diameter);
 
       const knotTarget: Knot = {
-        id: generateUuid(),
+        id: uuidv4(),
         parentShaftId: projTarget.segmentId,
         t: projTarget.t,
         pos: projTarget.pos,
@@ -690,7 +690,7 @@ export class CbxConverter {
         _importHint: 'braceImported',
       };
       const knotSource: Knot = {
-        id: generateUuid(),
+        id: uuidv4(),
         parentShaftId: projSource.segmentId,
         t: projSource.t,
         pos: projSource.pos,
@@ -699,7 +699,7 @@ export class CbxConverter {
       };
       knots.push(knotTarget, knotSource);
       braces.push({
-        id: generateUuid(),
+        id: uuidv4(),
         modelId: placeholderModelId,
         startKnotId: knotSource.id,
         endKnotId: knotTarget.id,
@@ -724,6 +724,7 @@ export class CbxConverter {
     // to that knot (a branch off the brace network) — and drop the floating root so
     // the host no longer tries to ground it.
     let forksReanchored = 0;
+    let forksRedirectedToPartner = 0;
     if (forkJunctionTrunks.length > 0) {
       const droppedRootIds = new Set<string>();
       // Knots that a brace attaches to (the convergence knots we want to anchor onto).
@@ -732,6 +733,14 @@ export class CbxConverter {
         if (br.startKnotId) braceKnotIds.add(br.startKnotId);
         if (br.endKnotId) braceKnotIds.add(br.endKnotId);
       }
+      // Find the ShaftRef (built earlier per support) that owns a given segment id,
+      // used below to re-host a convergence knot onto the OTHER pillar's shaft.
+      const findShaftRefForSegment = (segmentId: string): ShaftRef | null => {
+        for (const ref of shaftRefs) {
+          if (ref.segments.some((s) => s.segmentId === segmentId)) return ref;
+        }
+        return null;
+      };
       for (const fork of forkJunctionTrunks) {
         // Anchor onto the nearest BRACE-convergence knot at the fork base. We key off
         // "a brace references this knot" rather than shaft ownership, because the
@@ -747,13 +756,50 @@ export class CbxConverter {
         // Only re-anchor if a convergence knot is genuinely at the base (within 2mm).
         if (!best || bestD > 2.0) continue;
 
+        // The nearest-knot search above is keyed only on "a brace references this
+        // knot", not on which shaft hosts it — so it almost always finds the LOCAL
+        // knot the converging brace dropped on the fork's OWN base segment (it's
+        // trivially the closest possible point to itself), not the genuine knot on
+        // the OTHER pillar the brace actually connects to. Anchoring directly to that
+        // local knot makes the branch its own parent: a self-reference that the
+        // host's trunk-resolution walk can never escape (it renders fine — preserved
+        // knots draw at their authored position regardless — but never resolves to a
+        // trunk, so editing/selection logic that walks the parent chain breaks).
+        // When the chosen knot is self-hosted, follow its brace to the other endpoint
+        // and re-host a NEW knot at the SAME convergence position onto that external
+        // shaft instead — same geometry, but a parent chain that actually leads
+        // somewhere.
+        let anchorKnot = best;
+        const isSelfHosted = fork.trunk.segments.some((s) => s.id === best!.parentShaftId);
+        if (isSelfHosted) {
+          const hostBrace = braces.find((br) => br.startKnotId === best!.id || br.endKnotId === best!.id);
+          const partnerId = hostBrace
+            ? (hostBrace.startKnotId === best!.id ? hostBrace.endKnotId : hostBrace.startKnotId)
+            : null;
+          const partner = partnerId ? knots.find((k) => k.id === partnerId) : null;
+          const partnerShaftRef = partner ? findShaftRefForSegment(partner.parentShaftId) : null;
+          if (partnerShaftRef) {
+            const proj = projectToShaft(partnerShaftRef, best.pos);
+            anchorKnot = {
+              id: uuidv4(),
+              parentShaftId: proj.segmentId,
+              t: proj.t,
+              pos: { ...best.pos },
+              diameter: best.diameter,
+              _importHint: 'preserve',
+            };
+            knots.push(anchorKnot);
+            forksRedirectedToPartner++;
+          }
+        }
+
         // Re-parent the trunk's bottom segment to the convergence knot: set its
         // bottomJoint to a joint at the knot so the shaft starts from the convergence.
         const bottomSeg = fork.trunk.segments[0];
         bottomSeg.bottomJoint = {
-          id: generateUuid(),
-          pos: { x: best.pos.x, y: best.pos.y, z: best.pos.z },
-          diameter: best.diameter ?? getJointDiameter(bottomSeg.diameter),
+          id: uuidv4(),
+          pos: { x: anchorKnot.pos.x, y: anchorKnot.pos.y, z: anchorKnot.pos.z },
+          diameter: anchorKnot.diameter ?? getJointDiameter(bottomSeg.diameter),
         };
         // Emit the fork as a BRANCH (parented to the convergence knot), not a trunk.
         // The host routes every trunk through SmartPlacementV2, which always grounds
@@ -763,7 +809,7 @@ export class CbxConverter {
         const forkBranch: Branch = {
           id: fork.trunk.id,
           modelId: fork.trunk.modelId,
-          parentKnotId: best.id,
+          parentKnotId: anchorKnot.id,
           segments: fork.trunk.segments,
           contactCone: fork.trunk.contactCone,
         };
@@ -783,6 +829,7 @@ export class CbxConverter {
       console.log(`${LOG_PREFIX} fork junctions`, {
         total: forkJunctionTrunks.length,
         reanchored: forksReanchored,
+        redirectedToPartnerShaft: forksRedirectedToPartner,
         rootsDropped: droppedRootIds.size,
       });
     }
@@ -813,7 +860,7 @@ export class CbxConverter {
       if (!parentRef) { junctionDropped++; continue; }
       const proj = projectToShaft(parentRef, parentPos);
       const parentKnot: Knot = {
-        id: generateUuid(),
+        id: uuidv4(),
         parentShaftId: proj.segmentId,
         t: proj.t,
         pos: parentPos,
@@ -832,19 +879,19 @@ export class CbxConverter {
       // simply carries the load up to the junction knot, and the tips hang off it as
       // leaves, exactly as DF would if the junction had been hand-placed.
       const junctionTerminalJoint: Joint = {
-        id: generateUuid(),
+        id: uuidv4(),
         pos: junctionPos,
         diameter: getJointDiameter(shaftDiameter),
       };
       const branchSeg: Segment = {
-        id: generateUuid(),
+        id: uuidv4(),
         type: 'straight',
         diameter: shaftDiameter,
         bottomJoint: undefined, // connects to the parent knot
         topJoint: junctionTerminalJoint,
       };
       const junctionBranch: Branch = {
-        id: generateUuid(),
+        id: uuidv4(),
         modelId: placeholderModelId,
         parentKnotId: parentKnot.id,
         segments: [branchSeg],
@@ -862,7 +909,7 @@ export class CbxConverter {
       // Clone the position so each structure owns its own pos (matches the working
       // multi-tip trunk path, which builds a fresh sharedKnotPos for its knot).
       const junctionKnot: Knot = {
-        id: generateUuid(),
+        id: uuidv4(),
         parentShaftId: branchSeg.id,
         pos: { x: junctionPos.x, y: junctionPos.y, z: junctionPos.z },
         diameter: getJointDiameter(shaftDiameter),
@@ -949,10 +996,16 @@ export class CbxConverter {
       [0, 1, 1], [0, -1, 1], [0, 1, -1], [0, -1, -1],
     ];
     const PROBE_BACKOFF_MM = 0.4;
-    const recoverSurfaceNormal = (contact: Vec3, _towardOther: Vec3, fallback: Vec3): Vec3 => {
-      if (!mesh) return fallback;
+    // Returns the outward surface normal AND the snapped surface position (the
+    // actual mesh hit point). The authored CBX twig endpoint can sit a fraction
+    // of a mm off the mesh surface; snapping to the hit position — the same
+    // technique createContactAssembly uses for tip contacts — ensures the disk
+    // face is flush with the model surface rather than floating below it.
+    const recoverSurfaceContact = (contact: Vec3, _towardOther: Vec3, fallback: Vec3): { normal: Vec3; surfacePos: Vec3 | null } => {
+      if (!mesh) return { normal: fallback, surfacePos: null };
       const raycaster = new THREE.Raycaster();
       let bestNormal: THREE.Vector3 | null = null;
+      let bestSurfacePos: THREE.Vector3 | null = null;
       let bestErr = Infinity;
       const origin = new THREE.Vector3();
       for (const d of PROBE_DIRS) {
@@ -967,17 +1020,25 @@ export class CbxConverter {
         if (err < bestErr) {
           bestErr = err;
           bestNormal = hits[0].face.normal.clone().transformDirection(mesh.matrixWorld).normalize();
+          bestSurfacePos = hits[0].point.clone();
         }
       }
-      if (!bestNormal) return fallback;
+      if (!bestNormal) return { normal: fallback, surfacePos: null };
       // Orient OUTWARD: a point a small stand-off along +n must be OUTSIDE the model.
+      // Use the snapped surface position for the probe so the orientation test is
+      // accurate even when the authored contact is slightly off the mesh surface.
+      const probeOrigin = bestSurfacePos ?? new THREE.Vector3(contact.x, contact.y, contact.z);
       const probe = new THREE.Vector3(
-        contact.x + bestNormal.x * STANDOFF_PROBE_MM,
-        contact.y + bestNormal.y * STANDOFF_PROBE_MM,
-        contact.z + bestNormal.z * STANDOFF_PROBE_MM,
+        probeOrigin.x + bestNormal.x * STANDOFF_PROBE_MM,
+        probeOrigin.y + bestNormal.y * STANDOFF_PROBE_MM,
+        probeOrigin.z + bestNormal.z * STANDOFF_PROBE_MM,
       );
       if (pointInsideModel(probe)) bestNormal.multiplyScalar(-1);
-      return { x: bestNormal.x, y: bestNormal.y, z: bestNormal.z };
+      const normal: Vec3 = { x: bestNormal.x, y: bestNormal.y, z: bestNormal.z };
+      const surfacePos: Vec3 | null = bestSurfacePos
+        ? { x: bestSurfacePos.x, y: bestSurfacePos.y, z: bestSurfacePos.z }
+        : null;
+      return { normal, surfacePos };
     };
 
     for (const t of modelTwigs) {
@@ -991,9 +1052,15 @@ export class CbxConverter {
       const axisA = normalizeVec({ x: posB.x - posA.x, y: posB.y - posA.y, z: posB.z - posA.z });
       const axisB = { x: -axisA.x, y: -axisA.y, z: -axisA.z };
 
-      // Real surface normals at each end (fallback: the strut axis, pointing out).
-      const normalA = recoverSurfaceNormal(posA, posB, axisB);
-      const normalB = recoverSurfaceNormal(posB, posA, axisA);
+      // Real surface normals + snapped contact positions at each end. The authored
+      // CBX endpoint can sit slightly off the mesh; using the raycast hit position
+      // (same as createContactAssembly does for tip contacts) closes any gap.
+      const contactA = recoverSurfaceContact(posA, posB, axisB);
+      const contactB = recoverSurfaceContact(posB, posA, axisA);
+      const normalA = contactA.normal;
+      const normalB = contactB.normal;
+      const effectivePosA = contactA.surfacePos ?? posA;
+      const effectivePosB = contactB.surfacePos ?? posB;
 
       // Minimal disk-type profile — EXACTLY the host ContactDiskProfile shape
       // (type + diskThicknessMm + maxStandoffMm + standoffAngleThreshold). No tip
@@ -1021,20 +1088,21 @@ export class CbxConverter {
       const thicknessB = standoff(normalB, axisB, jointDiameterB, profB);
 
       // Joints sit OFF the surface along each surface normal (like the host).
+      // Use the snapped surface positions so the joint follows the corrected contact.
       const jointPosA: Vec3 = {
-        x: posA.x + normalA.x * thicknessA,
-        y: posA.y + normalA.y * thicknessA,
-        z: posA.z + normalA.z * thicknessA,
+        x: effectivePosA.x + normalA.x * thicknessA,
+        y: effectivePosA.y + normalA.y * thicknessA,
+        z: effectivePosA.z + normalA.z * thicknessA,
       };
       const jointPosB: Vec3 = {
-        x: posB.x + normalB.x * thicknessB,
-        y: posB.y + normalB.y * thicknessB,
-        z: posB.z + normalB.z * thicknessB,
+        x: effectivePosB.x + normalB.x * thicknessB,
+        y: effectivePosB.y + normalB.y * thicknessB,
+        z: effectivePosB.z + normalB.z * thicknessB,
       };
 
       const diskA: ContactDisk = {
-        id: generateUuid(),
-        pos: posA,
+        id: uuidv4(),
+        pos: effectivePosA,
         surfaceNormal: normalA,
         coneAxis: axisA,
         diskLengthOverride: thicknessA,
@@ -1042,8 +1110,8 @@ export class CbxConverter {
         contactDiameterMm: contactDiameter,
       };
       const diskB: ContactDisk = {
-        id: generateUuid(),
-        pos: posB,
+        id: uuidv4(),
+        pos: effectivePosB,
         surfaceNormal: normalB,
         coneAxis: axisB,
         diskLengthOverride: thicknessB,
@@ -1052,15 +1120,15 @@ export class CbxConverter {
       };
 
       twigs.push({
-        id: generateUuid(),
+        id: uuidv4(),
         modelId: placeholderModelId,
         segments: [
           {
-            id: generateUuid(),
+            id: uuidv4(),
             type: 'straight',
             diameter: contactDiameter, // legacy uniform value (taper carried by joints)
-            bottomJoint: { id: generateUuid(), pos: jointPosA, diameter: jointDiameterA },
-            topJoint: { id: generateUuid(), pos: jointPosB, diameter: jointDiameterB },
+            bottomJoint: { id: uuidv4(), pos: jointPosA, diameter: jointDiameterA },
+            topJoint: { id: uuidv4(), pos: jointPosB, diameter: jointDiameterB },
           },
         ],
         contactDiskA: diskA,
@@ -1099,7 +1167,7 @@ export class CbxConverter {
           ? Math.max((cc.profile as any).bodyDiameterMm, 0.8)
           : 0.8;
         const assembly = createContactAssembly(
-          { id: generateUuid(), base: { x: knot.pos.x, y: knot.pos.y, z: knot.pos.z }, tip: { x: cc.pos.x, y: cc.pos.y, z: cc.pos.z } },
+          { id: uuidv4(), base: { x: knot.pos.x, y: knot.pos.y, z: knot.pos.z }, tip: { x: cc.pos.x, y: cc.pos.y, z: cc.pos.z } },
           new THREE.Vector3(cc.pos.x, cc.pos.y, cc.pos.z),
           knot.pos,
           { length: tipLen, diameter: CBX_TIP_DEFAULTS.bodyDiameterMm, pointDiameter: CBX_TIP_DEFAULTS.contactDiameterMm },
@@ -1108,11 +1176,11 @@ export class CbxConverter {
           false, false, null, true,
         );
         branches.push({
-          id: generateUuid(),
+          id: uuidv4(),
           modelId: leaf.modelId,
           parentKnotId: knot.id,
           segments: [
-            { id: generateUuid(), type: 'straight', diameter: shaftDia, bottomJoint: undefined, topJoint: assembly.socketJoint },
+            { id: uuidv4(), type: 'straight', diameter: shaftDia, bottomJoint: undefined, topJoint: assembly.socketJoint },
           ],
           contactCone: assembly.contactCone,
         });
@@ -1125,12 +1193,12 @@ export class CbxConverter {
       }
     }
 
-    // --- Knot-centering sanity pass ----------------------------------------
-    // Resolve clusters of near-coincident brace knots on the same shaft to one
-    // shared spot (without merging them), so authored brace scatter doesn't leave a
-    // fan of attach points that makes the host's overhang support messier than the
-    // single clean attachment seen in Chitubox. Contact (leaf/branch) knots are used
-    // as anchors but never moved.
+    // --- Knot-centering / merge sanity pass ---------------------------------
+    // Resolve clusters of near-coincident brace knots on the same shaft down to one
+    // shared knot, so authored brace scatter doesn't leave a fan of attach points
+    // (each independently tracking its own diameter and able to drift out of sync
+    // on a later edit) where the host renders a single clean attachment in Chitubox.
+    // Contact (leaf/branch) knots are used as anchors but never moved or merged away.
     {
       const braceKnotIds = new Set<string>();
       for (const br of braces) {
@@ -1144,9 +1212,20 @@ export class CbxConverter {
       for (const lf of leaves) {
         if (lf.parentKnotId) contactKnotIds.add(lf.parentKnotId);
       }
-      const movedKnots = centerCoincidentKnots({ knots, braceKnotIds, contactKnotIds });
+      const { moved: movedKnots, merged: mergedKnots, idRemap } = centerCoincidentKnots({ knots, braceKnotIds, contactKnotIds });
+      if (idRemap.size > 0) {
+        for (const br of braces) {
+          const remappedStart = idRemap.get(br.startKnotId);
+          if (remappedStart) br.startKnotId = remappedStart;
+          const remappedEnd = idRemap.get(br.endKnotId);
+          if (remappedEnd) br.endKnotId = remappedEnd;
+        }
+      }
       if (CBX_DEBUG && movedKnots > 0) {
         cbxDebug(`knot-centering pass: resolved ${movedKnots} coincident brace knot(s) onto shared shaft spots`);
+      }
+      if (CBX_DEBUG && mergedKnots > 0) {
+        cbxDebug(`knot-merge pass: merged ${mergedKnots} duplicate brace knot(s) into shared knot ids`);
       }
     }
 

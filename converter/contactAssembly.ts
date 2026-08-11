@@ -171,10 +171,26 @@ export function createContactAssembly(
     z: finalTipPos.z + effectiveSurfaceNormal.z * diskOffset
   };
 
+  // The mesh raycast (finalTipPos) is the TRUE surface contact, which rarely sits
+  // exactly where the authored tipLen predicted (CBX's own contact estimate vs
+  // DF's raycast hit almost never agree exactly). Re-deriving the socket by
+  // walking the FIXED authored tipLen from the corrected tip drags the socket off
+  // the shaft's planned line by the full mismatch, producing a visible dogleg in
+  // the trunk. The raycast travels along the coneAxis line by construction (it's
+  // cast from socketPosVec toward tipWorld), so finalTipPos always lies on that
+  // same ray — project the original geometric socket guess back onto it instead.
+  // This re-anchors the socket at the planned attach point and lets the cone's
+  // actual length absorb the real-vs-authored distance, instead of the socket.
+  const MIN_CONE_LEN_MM = 0.3;
+  const coneStartVec = new THREE.Vector3(coneStartPos.x, coneStartPos.y, coneStartPos.z);
+  const projectedLen = socketPosVec.clone().sub(coneStartVec).dot(coneAxis);
+  const effectiveLen = projectedLen > MIN_CONE_LEN_MM ? projectedLen : tipLen;
+  coneProfile.lengthMm = effectiveLen;
+
   const alignedSocketPos = {
-    x: coneStartPos.x + coneAxis.x * tipLen,
-    y: coneStartPos.y + coneAxis.y * tipLen,
-    z: coneStartPos.z + coneAxis.z * tipLen
+    x: coneStartPos.x + coneAxis.x * effectiveLen,
+    y: coneStartPos.y + coneAxis.y * effectiveLen,
+    z: coneStartPos.z + coneAxis.z * effectiveLen
   };
 
   socketJoint.pos = alignedSocketPos;

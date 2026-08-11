@@ -4,7 +4,7 @@ import type { PluginFileTypeDefinition } from '@/features/plugins/complexPluginC
 import { CbxParser } from './CbxParser';
 import { CbxConverter, computeRaftZ, type CbxModelInput } from './CbxConverter';
 import { createDefaultSettings } from '@/supports/Settings/types';
-import { generateUuid } from '@/utils/uuid';
+import { v4 as uuidv4 } from 'uuid';
 import { initializeBVH, accelerateGeometry, disposeGeometryBVH } from '@/utils/bvh';
 
 /**
@@ -106,7 +106,7 @@ function convertSingleModel(
   model: CbxModelInput,
   settings: ReturnType<typeof createDefaultSettings>,
 ): CbxImportPayload {
-  const importedModelId = generateUuid();
+  const importedModelId = uuidv4();
 
   // CbxModelInput.geometry is typed optional; the parser always supplies
   // one, but guard here so the payload's geometry is always a real (possibly
@@ -296,7 +296,7 @@ export async function importCbxFile(
     console.warn('[chitubox-import] No model geometry found in container');
     // Best-effort empty payload so the importer can surface a clean state.
     return {
-      modelId: generateUuid(),
+      modelId: uuidv4(),
       name: 'model_1',
       geometry: new THREE.BufferGeometry(),
       transform: {
