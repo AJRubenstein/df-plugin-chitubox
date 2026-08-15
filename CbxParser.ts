@@ -61,17 +61,12 @@ const COORD_LIMIT = 500; // reject vertices outside ±500mm (matches Python guar
 // near-vertical pillars — which then produced spurious mid-air roots.
 const BRACE_XY_MIN = 0.3;
 
-// Record-table probe bounds (see findRecordBase). A record's geometry span is
-// the discriminator: in-bounds, non-empty, and a whole number of 36-byte
-// triangles. MIN_PROBE_TRIS keeps a run of zero or noise bytes from validating
-// — every real model in the sample library is far above it.
+// Record-table probe bounds (see findRecordBase). A candidate record is judged
+// by its geometry span: in-bounds, non-empty, whole 36-byte triangles, and at
+// least MIN_PROBE_TRIS of them so zero or noise regions cannot validate.
 const MIN_PROBE_TRIS = 100;
-// Observed shifts are tiny (-16); this is deliberately wider without being
-// large enough to reach a neighbouring record at STRIDE 680.
-const PROBE_DELTA_MAX = 128;
-// Files without meshOffset indirection keep the table near the top (412 in the
-// observed case); 64 KiB is generous headroom for the absolute scan.
-const ABS_PROBE_LIMIT = 65536;
+const PROBE_DELTA_MAX = 128;   // max shift from meshOffset+444, either direction
+const ABS_PROBE_LIMIT = 65536; // how far into the file the absolute scan looks
 
 const LOG_PREFIX = '[CbxParser]';
 
@@ -178,9 +173,6 @@ function splitBlocks(tags: number[]): number[] {
  *     XY distance from the pillar as a tiebreak so branched tips (own contact XY)
  *     and closely-stacked supports don't steal each other's tips.
  *
- * All Z values are returned in world frame (raw + zOff). Diameters are radius×2.
- * Validated against SPOTLIGHT.chitubox (7 supports, 8 tips) matching an
- * independent Cbx layer scrub.
  */
 function parseSupportBlock(
   view: DataView,
@@ -648,13 +640,9 @@ function parseSupportBlock(
 }
 
 /**
- * Locate the record table by absolute scan and return the earliest geometry
- * start it declares, or null when no plausible table is found.
- *
- * Used only for the layout that carries no meshOffset indirection, where the
- * table sits near the top of the file. Knowing where geometry begins bounds the
- * support-record and Z-offset scans, which would otherwise run to EOF and read
- * mesh vertices as if they were support records.
+ * Scan for the record table and return the earliest geometry offset it declares,
+ * or null if no plausible table is found. Used for files without a usable
+ * meshOffset, where this is the only way to find where geometry begins.
  */
 function earliestGeometryStart(view: DataView, len: number, nInstances: number): number | null {
   const TAIL_OFF = 256;
@@ -769,17 +757,11 @@ export class CbxParser {
 
     const filename = decodeCString(bytes, fnamePtr, 64) || sourceName;
 
-    // `meshOffset` is not trustworthy on every file. In the layout where the
-    // record table sits at an absolute offset there is no indirection at all,
-    // and 0x424 lands inside the first record's filename string — so this
-    // decodes as ASCII-as-u32 (e.g. 1214214757) far past EOF. Reading through
-    // it unguarded throws "Offset is outside the bounds of the DataView" before
-    // the record-table probe below ever runs.
-    //
-    // Treat an out-of-range meshOffset as "no usable header hint": skip the
-    // primary-tri-count shortcut and scan from the top of the file instead.
-    // The probe recovers the real table, and every geometry span is read from
-    // the per-record pointers rather than from these values.
+    // Some files have no meshOffset indirection: 0x424 falls inside the first
+    // record's filename, so it decodes as text-as-u32 and points past EOF.
+    // Reading through it unguarded throws a DataView range error. When it is
+    // out of range, ignore it — the probe below finds the real record table,
+    // and geometry is always read from the per-record pointers.
     const meshOffsetUsable = meshOffset > 0 && meshOffset + 724 <= len;
     if (!meshOffsetUsable) {
       console.warn(
@@ -788,20 +770,16 @@ export class CbxParser {
       );
     }
 
-    // Primary model tri count lives at mesh_offset + 720. It bounds the region
-    // searched for support records and for the Z offset: everything from the
-    // header up to where geometry begins.
+    // Primary model tri count lives at mesh_offset + 720. It marks where
+    // geometry begins, bounding the support-record and Z-offset scans below.
     const modelBytes0 = meshOffsetUsable ? u32(view, meshOffset + 720) : 0;
     let modelStart = modelBytes0 > 0
       ? len - Math.floor(modelBytes0 / 36) * 36
       : len;
 
-    // With no usable meshOffset the line above leaves `modelStart` at EOF,
-    // which would let the support-record and Z-offset scans below run straight
-    // over the geometry pool and pick a mesh vertex as the plate Z. Recover the
-    // real boundary now by locating the record table early and taking the
-    // earliest authored geometry span. (findRecordBase() below repeats this
-    // search for the general case; here we only need the absolute-layout arm.)
+    // Without meshOffset that shortcut is unavailable and modelStart is left at
+    // EOF, which would let the scans run over the geometry and read a mesh
+    // vertex as the plate Z. Derive the boundary from the record table instead.
     if (!meshOffsetUsable) {
       const earliest = earliestGeometryStart(view, len, nInstances);
       if (earliest !== null && earliest < modelStart) {
@@ -862,23 +840,13 @@ export class CbxParser {
     const STRIDE = 680;
     const NO_SUPPORT = 0xffffffff;
 
-    // `meshOffset + 444` holds for the overwhelming majority of files (120 of
-    // 121 in a scan of a mixed library), but two other layouts exist in the
-    // wild and both decode perfectly once the table is found:
+    // Most files put the record table at `meshOffset + 444`, but two other
+    // layouts exist: a small shift from that offset (seen at -16), and no
+    // meshOffset indirection at all, with the table near the top of the file.
     //
-    //   - a small negative shift, e.g. "Cisne origami.chitubox" (CHITUBOX 2023)
-    //     puts the table at `meshOffset + 428`. At +444 every tail field reads
-    //     as 0, so the record looks empty rather than wrong.
-    //   - no meshOffset indirection at all: the table sits near the top of the
-    //     file (offset 412 in the observed case) and offset 424 lands *inside*
-    //     the first filename string, so meshOffset decodes as ASCII-as-u32
-    //     nonsense (e.g. 1214214757) far past the end of the file.
-    //
-    // Rather than special-case versions we cannot enumerate, probe for the
-    // table: accept a base only when record 0 carries a plausible geometry
-    // span, and — when the file declares more than one instance — when the
-    // next record does too at STRIDE spacing. Two records agreeing at the
-    // authored stride is not something random bytes produce.
+    // Probe rather than special-case. A base is accepted only when record 0
+    // has a plausible geometry span and, when the file declares more than one
+    // instance, the next record does too at STRIDE spacing.
     const recordLooksValid = (recBase: number): boolean => {
       const tail = recBase + TAIL;
       if (recBase < 0 || tail + 28 > len) return false;
@@ -903,8 +871,7 @@ export class CbxParser {
 
     const findRecordBase = (): number => {
       const expected = meshOffset + 444;
-      // Fast path: the layout we expect, checked first so a valid file can
-      // never be dragged onto a coincidental match elsewhere.
+      // Checked first, so a valid file can never match elsewhere by chance.
       if (meshOffset > 0 && meshOffset < len && baseLooksValid(expected)) {
         return expected;
       }
@@ -915,7 +882,7 @@ export class CbxParser {
             if (baseLooksValid(cand)) {
               console.warn(
                 `${LOG_PREFIX} record table found at meshOffset+${cand - meshOffset} `
-                + `(expected +444); treating as a header layout variant.`,
+                + `(expected +444).`,
               );
               return cand;
             }
@@ -932,8 +899,8 @@ export class CbxParser {
           return cand;
         }
       }
-      // Nothing matched — keep the historical base so the existing per-record
-      // guards report the failure in their usual terms.
+      // Nothing matched: keep the usual base so the per-record guards below
+      // report the failure as they always have.
       console.warn(
         `${LOG_PREFIX} could not locate a valid record table (meshOffset=${meshOffset}); `
         + `falling back to meshOffset+444.`,
