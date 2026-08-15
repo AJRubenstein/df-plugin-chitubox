@@ -61,6 +61,13 @@ const COORD_LIMIT = 500; // reject vertices outside ±500mm (matches Python guar
 // near-vertical pillars — which then produced spurious mid-air roots.
 const BRACE_XY_MIN = 0.3;
 
+// Record-table probe bounds (see findRecordBase). A candidate record is judged
+// by its geometry span: in-bounds, non-empty, whole 36-byte triangles, and at
+// least MIN_PROBE_TRIS of them so zero or noise regions cannot validate.
+const MIN_PROBE_TRIS = 100;
+const PROBE_DELTA_MAX = 128;   // max shift from meshOffset+444, either direction
+const ABS_PROBE_LIMIT = 65536; // how far into the file the absolute scan looks
+
 const LOG_PREFIX = '[CbxParser]';
 
 /** Little-endian readers over a DataView (mirror struct.unpack_from('<I'/'<f')). */
@@ -166,9 +173,6 @@ function splitBlocks(tags: number[]): number[] {
  *     XY distance from the pillar as a tiebreak so branched tips (own contact XY)
  *     and closely-stacked supports don't steal each other's tips.
  *
- * All Z values are returned in world frame (raw + zOff). Diameters are radius×2.
- * Validated against SPOTLIGHT.chitubox (7 supports, 8 tips) matching an
- * independent Cbx layer scrub.
  */
 function parseSupportBlock(
   view: DataView,
@@ -636,6 +640,44 @@ function parseSupportBlock(
 }
 
 /**
+ * Scan for the record table and return the earliest geometry offset it declares,
+ * or null if no plausible table is found. Used for files without a usable
+ * meshOffset, where this is the only way to find where geometry begins.
+ */
+function earliestGeometryStart(view: DataView, len: number, nInstances: number): number | null {
+  const TAIL_OFF = 256;
+  const STRIDE_OFF = 680;
+
+  const recValid = (recBase: number): boolean => {
+    const tail = recBase + TAIL_OFF;
+    if (recBase < 0 || tail + 28 > len) return false;
+    const gs = u32(view, tail + 16);
+    const bc = u32(view, tail + 20);
+    return (
+      gs > 0 && gs < len && bc > 0 && gs + bc <= len
+      && bc % 36 === 0 && bc / 36 >= MIN_PROBE_TRIS
+    );
+  };
+
+  for (let base = 0; base < Math.min(ABS_PROBE_LIMIT, len); base += 4) {
+    if (!recValid(base)) continue;
+    if (nInstances >= 2 && !recValid(base + STRIDE_OFF)) continue;
+    let earliest = len;
+    for (let k = 0; k < nInstances; k++) {
+      const tail = base + k * STRIDE_OFF + TAIL_OFF;
+      if (tail + 28 > len) break;
+      const gs = u32(view, tail + 16);
+      const bc = u32(view, tail + 20);
+      if (gs > 0 && gs < len && bc > 0 && gs + bc <= len && gs < earliest) {
+        earliest = gs;
+      }
+    }
+    return earliest < len ? earliest : null;
+  }
+  return null;
+}
+
+/**
  * Read a flat 36-byte-triangle geometry region into a non-indexed position
  * array (THREE expects 3 verts × 3 floats per triangle). Applies the Z offset
  * and drops any triangle with a vertex outside ±COORD_LIMIT (matches Python).
@@ -715,12 +757,39 @@ export class CbxParser {
 
     const filename = decodeCString(bytes, fnamePtr, 64) || sourceName;
 
-    // Primary model tri count lives at mesh_offset + 720.
-    const modelBytes0 = u32(view, meshOffset + 720);
-    let modelStart = len - Math.floor(modelBytes0 / 36) * 36;
+    // Some files have no meshOffset indirection: 0x424 falls inside the first
+    // record's filename, so it decodes as text-as-u32 and points past EOF.
+    // Reading through it unguarded throws a DataView range error. When it is
+    // out of range, ignore it — the probe below finds the real record table,
+    // and geometry is always read from the per-record pointers.
+    const meshOffsetUsable = meshOffset > 0 && meshOffset + 724 <= len;
+    if (!meshOffsetUsable) {
+      console.warn(
+        `${LOG_PREFIX} meshOffset (${meshOffset}) is out of range for a `
+        + `${len}-byte file; falling back to a full-file scan for supports.`,
+      );
+    }
+
+    // Primary model tri count lives at mesh_offset + 720. It marks where
+    // geometry begins, bounding the support-record and Z-offset scans below.
+    const modelBytes0 = meshOffsetUsable ? u32(view, meshOffset + 720) : 0;
+    let modelStart = modelBytes0 > 0
+      ? len - Math.floor(modelBytes0 / 36) * 36
+      : len;
+
+    // Without meshOffset that shortcut is unavailable and modelStart is left at
+    // EOF, which would let the scans run over the geometry and read a mesh
+    // vertex as the plate Z. Derive the boundary from the record table instead.
+    if (!meshOffsetUsable) {
+      const earliest = earliestGeometryStart(view, len, nInstances);
+      if (earliest !== null && earliest < modelStart) {
+        modelStart = earliest;
+      }
+    }
 
     // Locate first TAG; absence means a no-support file.
-    const firstTag = findFirstTag(bytes, meshOffset + 720, modelStart);
+    const tagScanStart = meshOffsetUsable ? meshOffset + 720 : 0;
+    const firstTag = findFirstTag(bytes, tagScanStart, modelStart);
     const hasSupports = firstTag !== -1;
 
     // Z offset: most-negative plausible float in the post-header scan region.
@@ -767,10 +836,80 @@ export class CbxParser {
     // corrupted OBJ geometry. The offsets above are correct; no special-casing of
     // anomalous entries, embedded blocks, or duplicate inference is needed.
 
-    const REC_BASE = meshOffset + 444; // first record (filename) start
     const TAIL = 256; // tail offset within a record
     const STRIDE = 680;
     const NO_SUPPORT = 0xffffffff;
+
+    // Most files put the record table at `meshOffset + 444`, but two other
+    // layouts exist: a small shift from that offset (seen at -16), and no
+    // meshOffset indirection at all, with the table near the top of the file.
+    //
+    // Probe rather than special-case. A base is accepted only when record 0
+    // has a plausible geometry span and, when the file declares more than one
+    // instance, the next record does too at STRIDE spacing.
+    const recordLooksValid = (recBase: number): boolean => {
+      const tail = recBase + TAIL;
+      if (recBase < 0 || tail + 28 > len) return false;
+      const geoStart = u32(view, tail + 16);
+      const byteCount = u32(view, tail + 20);
+      return (
+        geoStart > 0
+        && geoStart < len
+        && byteCount > 0
+        && geoStart + byteCount <= len
+        && byteCount % 36 === 0
+        && byteCount / 36 >= MIN_PROBE_TRIS
+      );
+    };
+
+    const baseLooksValid = (recBase: number): boolean => {
+      if (!recordLooksValid(recBase)) return false;
+      // Only corroborate with a second record when one is actually declared.
+      if (nInstances >= 2 && !recordLooksValid(recBase + STRIDE)) return false;
+      return true;
+    };
+
+    const findRecordBase = (): number => {
+      const expected = meshOffset + 444;
+      // Checked first, so a valid file can never match elsewhere by chance.
+      if (meshOffset > 0 && meshOffset < len && baseLooksValid(expected)) {
+        return expected;
+      }
+      // Nearby shifts, smallest displacement first.
+      if (meshOffset > 0 && meshOffset < len) {
+        for (let d = 1; d <= PROBE_DELTA_MAX; d++) {
+          for (const cand of [expected - d, expected + d]) {
+            if (baseLooksValid(cand)) {
+              console.warn(
+                `${LOG_PREFIX} record table found at meshOffset+${cand - meshOffset} `
+                + `(expected +444).`,
+              );
+              return cand;
+            }
+          }
+        }
+      }
+      // No usable meshOffset: scan the head of the file on a 4-byte grid.
+      for (let cand = 0; cand < Math.min(ABS_PROBE_LIMIT, len); cand += 4) {
+        if (baseLooksValid(cand)) {
+          console.warn(
+            `${LOG_PREFIX} meshOffset (${meshOffset}) unusable; record table `
+            + `located at absolute offset ${cand}.`,
+          );
+          return cand;
+        }
+      }
+      // Nothing matched: keep the usual base so the per-record guards below
+      // report the failure as they always have.
+      console.warn(
+        `${LOG_PREFIX} could not locate a valid record table (meshOffset=${meshOffset}); `
+        + `falling back to meshOffset+444.`,
+      );
+      return expected;
+    };
+
+    const REC_BASE = findRecordBase(); // first record (filename) start
+
 
     interface InstanceHeader {
       index: number;
