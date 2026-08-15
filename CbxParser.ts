@@ -648,6 +648,48 @@ function parseSupportBlock(
 }
 
 /**
+ * Locate the record table by absolute scan and return the earliest geometry
+ * start it declares, or null when no plausible table is found.
+ *
+ * Used only for the layout that carries no meshOffset indirection, where the
+ * table sits near the top of the file. Knowing where geometry begins bounds the
+ * support-record and Z-offset scans, which would otherwise run to EOF and read
+ * mesh vertices as if they were support records.
+ */
+function earliestGeometryStart(view: DataView, len: number, nInstances: number): number | null {
+  const TAIL_OFF = 256;
+  const STRIDE_OFF = 680;
+
+  const recValid = (recBase: number): boolean => {
+    const tail = recBase + TAIL_OFF;
+    if (recBase < 0 || tail + 28 > len) return false;
+    const gs = u32(view, tail + 16);
+    const bc = u32(view, tail + 20);
+    return (
+      gs > 0 && gs < len && bc > 0 && gs + bc <= len
+      && bc % 36 === 0 && bc / 36 >= MIN_PROBE_TRIS
+    );
+  };
+
+  for (let base = 0; base < Math.min(ABS_PROBE_LIMIT, len); base += 4) {
+    if (!recValid(base)) continue;
+    if (nInstances >= 2 && !recValid(base + STRIDE_OFF)) continue;
+    let earliest = len;
+    for (let k = 0; k < nInstances; k++) {
+      const tail = base + k * STRIDE_OFF + TAIL_OFF;
+      if (tail + 28 > len) break;
+      const gs = u32(view, tail + 16);
+      const bc = u32(view, tail + 20);
+      if (gs > 0 && gs < len && bc > 0 && gs + bc <= len && gs < earliest) {
+        earliest = gs;
+      }
+    }
+    return earliest < len ? earliest : null;
+  }
+  return null;
+}
+
+/**
  * Read a flat 36-byte-triangle geometry region into a non-indexed position
  * array (THREE expects 3 verts × 3 floats per triangle). Applies the Z offset
  * and drops any triangle with a vertex outside ±COORD_LIMIT (matches Python).
@@ -727,12 +769,49 @@ export class CbxParser {
 
     const filename = decodeCString(bytes, fnamePtr, 64) || sourceName;
 
-    // Primary model tri count lives at mesh_offset + 720.
-    const modelBytes0 = u32(view, meshOffset + 720);
-    let modelStart = len - Math.floor(modelBytes0 / 36) * 36;
+    // `meshOffset` is not trustworthy on every file. In the layout where the
+    // record table sits at an absolute offset there is no indirection at all,
+    // and 0x424 lands inside the first record's filename string — so this
+    // decodes as ASCII-as-u32 (e.g. 1214214757) far past EOF. Reading through
+    // it unguarded throws "Offset is outside the bounds of the DataView" before
+    // the record-table probe below ever runs.
+    //
+    // Treat an out-of-range meshOffset as "no usable header hint": skip the
+    // primary-tri-count shortcut and scan from the top of the file instead.
+    // The probe recovers the real table, and every geometry span is read from
+    // the per-record pointers rather than from these values.
+    const meshOffsetUsable = meshOffset > 0 && meshOffset + 724 <= len;
+    if (!meshOffsetUsable) {
+      console.warn(
+        `${LOG_PREFIX} meshOffset (${meshOffset}) is out of range for a `
+        + `${len}-byte file; falling back to a full-file scan for supports.`,
+      );
+    }
+
+    // Primary model tri count lives at mesh_offset + 720. It bounds the region
+    // searched for support records and for the Z offset: everything from the
+    // header up to where geometry begins.
+    const modelBytes0 = meshOffsetUsable ? u32(view, meshOffset + 720) : 0;
+    let modelStart = modelBytes0 > 0
+      ? len - Math.floor(modelBytes0 / 36) * 36
+      : len;
+
+    // With no usable meshOffset the line above leaves `modelStart` at EOF,
+    // which would let the support-record and Z-offset scans below run straight
+    // over the geometry pool and pick a mesh vertex as the plate Z. Recover the
+    // real boundary now by locating the record table early and taking the
+    // earliest authored geometry span. (findRecordBase() below repeats this
+    // search for the general case; here we only need the absolute-layout arm.)
+    if (!meshOffsetUsable) {
+      const earliest = earliestGeometryStart(view, len, nInstances);
+      if (earliest !== null && earliest < modelStart) {
+        modelStart = earliest;
+      }
+    }
 
     // Locate first TAG; absence means a no-support file.
-    const firstTag = findFirstTag(bytes, meshOffset + 720, modelStart);
+    const tagScanStart = meshOffsetUsable ? meshOffset + 720 : 0;
+    const firstTag = findFirstTag(bytes, tagScanStart, modelStart);
     const hasSupports = firstTag !== -1;
 
     // Z offset: most-negative plausible float in the post-header scan region.
@@ -863,6 +942,7 @@ export class CbxParser {
     };
 
     const REC_BASE = findRecordBase(); // first record (filename) start
+
 
     interface InstanceHeader {
       index: number;
