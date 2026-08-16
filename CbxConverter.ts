@@ -175,10 +175,15 @@ function buildStick(
     synthTipSettings(upTip, shaftDiameter), tipDefaults, mesh,
     false, false, null, true,
   );
+  // enforceSocketBelowTip must be OFF for the downward cone. It picks whichever
+  // socket candidate sits BELOW the contact, which is right for a cone reaching
+  // up to the model but inverted here: this cone points down, so its socket is
+  // ABOVE its contact. Leaving it on flipped the cone away from the surface and
+  // left the contact disk floating.
   const assemblyB = createContactAssembly(
     synthSupportForTip(down, hubBottom), contactB, hubBottom,
     synthTipSettings(down, shaftDiameter), tipDefaults, mesh,
-    false, false, null, true,
+    false, false, null, false,
   );
 
   const jointA: Joint = { id: uuidv4(), pos: hubTop, diameter: getJointDiameter(shaftDiameter) };
