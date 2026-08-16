@@ -295,7 +295,12 @@ async function importCtpFile(file: File): Promise<CbxImportPayload[]> {
     const geometry = model.geometry ?? new THREE.BufferGeometry();
     const plateX = model.transform?.plateX ?? 0;
     const plateY = model.transform?.plateY ?? 0;
-    const liftZ = model.transform?.liftZ ?? 0;
+    // Supports were shifted by parsed.zOffset to seat the lowest foot on the
+    // plate. The mesh is authored in that same frame, so it needs the identical
+    // shift -- without it the model floats exactly zOffset above its supports.
+    const liftZ = parsed.zOffset > 0
+      ? parsed.zOffset
+      : (model.transform?.liftZ ?? 0);
 
     let dragonfruitData = model.supports.length > 0
       ? CbxConverter.convert(model, settings)

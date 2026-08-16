@@ -388,6 +388,12 @@ function buildSupports(records: CtpPoolRecord[], zOff: number): CbxSupport[] {
 export interface ParsedCtpContainer {
   filename: string;
   objectCount: number;
+  /**
+   * Z shift applied to supports so the lowest foot sits on the plate. The mesh
+   * is stored in the same authored frame, so the host must lift it by the same
+   * amount or model and supports end up separated by this distance.
+   */
+  zOffset: number;
   models: CbxModelInput[];
 }
 
@@ -474,6 +480,6 @@ export class CtpParser {
       `${LOG_PREFIX} parsed ${models.length} object(s), ${pool.length} support part(s).`,
     );
 
-    return { filename: sourceName, objectCount: models.length, models };
+    return { filename: sourceName, objectCount: models.length, zOffset: zOff, models };
   }
 }
