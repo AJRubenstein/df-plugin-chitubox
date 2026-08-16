@@ -11,6 +11,7 @@ import {
   Segment,
   Vec3,
   Twig,
+  Stick,
   ContactDisk,
 } from '@/supports/types';
 import { SupportSettings } from '@/supports/Settings';
@@ -139,6 +140,96 @@ interface BuiltSupport {
  *   primary tip       → trunk terminal cone (authored length)
  *   extra tips        → Knot on the shaft + Branch with its own cone
  */
+/**
+ * Build a Stick: a model-to-model support whose body spans between two contact
+ * points on the model, rather than rising from the plate.
+ *
+ * The two cones are the authored downward tip and the LOWEST upward tip -- the
+ * pair that actually bracket the pillar. Any further upward tips are extra
+ * contacts on the hub and are returned as leaves/branches so nothing is lost.
+ */
+function buildStick(
+  s: CbxSupport,
+  modelId: string,
+  raftZ: number,
+  tipDefaults: typeof CBX_TIP_DEFAULTS,
+  mesh?: THREE.Mesh,
+): { stick: Stick; knots: Knot[]; branches: Branch[]; leaves: Leaf[] } | null {
+  const down = s.downwardTip;
+  if (!down || s.tips.length === 0) return null;
+
+  const z = (worldZ: number) => worldZ - raftZ;
+  const shaftDiameter = s.pillarDiameter;
+
+  // Lowest upward tip pairs with the downward one; the rest hang off the hub.
+  const sorted = [...s.tips].sort((a, b) => a.contactZ - b.contactZ);
+  const [upTip, ...extraTips] = sorted;
+
+  const contactA = new THREE.Vector3(upTip.x, upTip.y, z(upTip.contactZ));
+  const contactB = new THREE.Vector3(down.x, down.y, z(down.contactZ));
+  const hubTop: Vec3 = { x: s.pillarX, y: s.pillarY, z: z(s.pillarTopZ) };
+  const hubBottom: Vec3 = { x: s.pillarX, y: s.pillarY, z: z(s.pillarBottomZ) };
+
+  const assemblyA = createContactAssembly(
+    synthSupportForTip(upTip, hubTop), contactA, hubTop,
+    synthTipSettings(upTip, shaftDiameter), tipDefaults, mesh,
+    false, false, null, true,
+  );
+  const assemblyB = createContactAssembly(
+    synthSupportForTip(down, hubBottom), contactB, hubBottom,
+    synthTipSettings(down, shaftDiameter), tipDefaults, mesh,
+    false, false, null, true,
+  );
+
+  const jointA: Joint = { id: uuidv4(), pos: hubTop, diameter: getJointDiameter(shaftDiameter) };
+  const jointB: Joint = { id: uuidv4(), pos: hubBottom, diameter: getJointDiameter(shaftDiameter) };
+
+  const stick: Stick = {
+    id: uuidv4(),
+    modelId,
+    segments: [
+      {
+        id: uuidv4(),
+        type: 'straight',
+        diameter: shaftDiameter,
+        bottomJoint: jointB,
+        topJoint: jointA,
+      },
+    ],
+    contactConeA: assemblyA.contactCone,
+    contactConeB: assemblyB.contactCone,
+  };
+
+  // Remaining upward contacts become leaves/branches on a hub knot, exactly as
+  // extra tips do on a trunk.
+  const knots: Knot[] = [];
+  const branches: Branch[] = [];
+  const leaves: Leaf[] = [];
+
+  if (extraTips.length > 0) {
+    const hubKnot: Knot = {
+      id: uuidv4(),
+      parentShaftId: stick.segments[0].id,
+      pos: hubTop,
+      diameter: getJointDiameter(shaftDiameter),
+      _importHint: 'preserve',
+    };
+    knots.push(hubKnot);
+
+    for (const tip of extraTips) {
+      const { leaf, branch } = buildTipFromKnot(
+        tip, hubKnot, hubTop,
+        new THREE.Vector3(tip.x, tip.y, z(tip.contactZ)),
+        shaftDiameter, modelId, tipDefaults, mesh,
+      );
+      if (leaf) leaves.push(leaf);
+      if (branch) branches.push(branch);
+    }
+  }
+
+  return { stick, knots, branches, leaves };
+}
+
 function buildSupport(
   s: CbxSupport,
   modelId: string,
@@ -422,6 +513,7 @@ export class CbxConverter {
     const trunks: Trunk[] = [];
     const knots: Knot[] = [];
     const branches: Branch[] = [];
+    const sticks: Stick[] = [];
     const leaves: Leaf[] = [];
     const braces: Brace[] = [];
 
@@ -497,6 +589,22 @@ export class CbxConverter {
 
     for (const s of supportsForBuild) {
       try {
+        // A support with a downward contact spans between two parts of the
+        // model rather than standing on the plate: DragonFruit models that as a
+        // Stick, whose two contact cones are the downward tip and the lowest
+        // upward tip, with the pillar as its body. Any remaining upward tips
+        // become leaves/branches on the hub via the normal path below.
+        if (s.downwardTip && s.tips.length > 0) {
+          const stick = buildStick(s, placeholderModelId, raftZ, tipDefaults, mesh);
+          if (stick) {
+            sticks.push(stick.stick);
+            knots.push(...stick.knots);
+            branches.push(...stick.branches);
+            leaves.push(...stick.leaves);
+            continue;
+          }
+        }
+
         const built = buildSupport(
           s, placeholderModelId, raftZ, tipDefaults, rootDefaults, shaftDefaults, mesh,
         );
@@ -1256,7 +1364,7 @@ export class CbxConverter {
       branches,
       leaves,
       twigs,
-      sticks: [],
+      sticks,
       braces,
       anchors: [],
       knots,
@@ -1269,6 +1377,9 @@ export class CbxConverter {
       branches: result.branches.length,
       braces: result.braces.length,
       knots: result.knots.length,
+      leaves: result.leaves.length,
+      twigs: result.twigs?.length ?? 0,
+      sticks: result.sticks?.length ?? 0,
       raftZ,
     });
 

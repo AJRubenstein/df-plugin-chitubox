@@ -639,6 +639,33 @@ function parseSupportBlock(
         };
       }),
       isForkJunction: fork,
+      // A contact hanging DOWN from the pillar bottom means this support spans
+      // between two parts of the model rather than standing on the plate. Its
+      // socket sits on the bottom knot; the chain builder only matches tips to
+      // the TOP knot, so it is picked up here.
+      downwardTip: (() => {
+        const down = recs.find((r) =>
+          (r.sub === TIP_SUB)
+          && Math.abs(r.botZ - c.pillar.botZ) <= 0.15
+          && Math.hypot(r.x2 - c.pillar.x, r.y2 - c.pillar.y) <= 0.5
+          && r.topZ < r.botZ);
+        if (!down) return undefined;
+        const dx = down.x - down.x2;
+        const dy = down.y - down.y2;
+        const dz = down.topZ - down.botZ;
+        return {
+          x: down.x,
+          y: down.y,
+          contactZ: down.topZ,
+          attachZ: down.botZ,
+          socketX: down.x2,
+          socketY: down.y2,
+          length: Math.sqrt(dx * dx + dy * dy + dz * dz),
+          contactDiameter: down.paramA * 2,
+          bodyDiameter: down.paramB * 2,
+          contactDepth: down.extra,
+        };
+      })(),
     };
 
     supports.push(support);
