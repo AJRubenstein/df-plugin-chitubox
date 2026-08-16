@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { CbxModelInput, CbxSupport } from './CbxConverter';
+import type { CbxBrace, CbxModelInput, CbxSupport } from './CbxConverter';
 
 /**
  * Parser for `.ctp` (ChiTuBox **Pro**) project files.
@@ -42,6 +42,15 @@ const SUPPORT_INDEX_STRIDE = 40;
 const SUPPORT_INDEX_POOL_PTR = 32;
 /** Stride of a support pool record. */
 const POOL_STRIDE = 48;
+
+/**
+ * A role-3 record whose two endpoints differ in XY by more than this is a
+ * diagonal BRACE between shafts, not a vertical pillar. Authored pillars are
+ * dead-vertical; braces span at least ~0.8mm. Same threshold the Basic parser
+ * uses. On lily_Arm_L this separates 546 braces from 138 real pillars -- without
+ * it every brace becomes its own support and plants a spurious root on the raft.
+ */
+const BRACE_XY_MIN = 0.3;
 
 function u32(view: DataView, off: number): number {
   return view.getUint32(off, true);
@@ -268,7 +277,10 @@ function readSupportPool(view: DataView, bytes: Uint8Array, len: number): CtpPoo
  *
  * This assigns every tip in all four support-bearing samples.
  */
-function buildSupports(records: CtpPoolRecord[], zOff: number): CbxSupport[] {
+function buildSupports(
+  records: CtpPoolRecord[],
+  zOff: number,
+): { supports: CbxSupport[]; braces: CbxBrace[] } {
   // Authored joints meet to a few thousandths; parts of one support share an XY
   // to float noise. Both tolerances are far below the spacing between supports.
   const Z_EPS = 0.05;
@@ -276,8 +288,11 @@ function buildSupports(records: CtpPoolRecord[], zOff: number): CbxSupport[] {
   // A tip's socket lands on its knot centre this closely.
   const TIP_Z_TOL = 0.1;
 
+  const isBrace = (r: CtpPoolRecord) =>
+    r.role === ROLE_PILLAR && Math.hypot(r.x - r.x2, r.y - r.y2) > BRACE_XY_MIN;
+
   const byRole = (role: number) => records.filter((r) => r.role === role);
-  const pillars = byRole(ROLE_PILLAR);
+  const pillars = byRole(ROLE_PILLAR).filter((r) => !isBrace(r));
   const knots = byRole(ROLE_KNOT);
   const bases = byRole(ROLE_BASE);
   const feet = byRole(ROLE_FOOT);
@@ -382,7 +397,21 @@ function buildSupports(records: CtpPoolRecord[], zOff: number): CbxSupport[] {
     });
   }
 
-  return supports;
+  // Diagonal role-3 records are authored shaft-to-shaft struts: on lily_Arm_L
+  // 188 of 200 sampled braces land both endpoints on a real pillar. Unlike the
+  // Basic format, where bracing has to be inferred, Pro stores them explicitly,
+  // so they are passed straight through.
+  const braces: CbxBrace[] = records.filter(isBrace).map((b) => ({
+    ax: b.x,
+    ay: b.y,
+    az: b.topZ + zOff,
+    bx: b.x2,
+    by: b.y2,
+    bz: b.botZ + zOff,
+    diameter: b.paramA * 2,
+  }));
+
+  return { supports, braces };
 }
 
 export interface ParsedCtpContainer {
@@ -449,14 +478,17 @@ export class CtpParser {
       const transform = objectChunks[i] != null
         ? readObjectTransform(view, objectChunks[i], len)
         : null;
-      const supports = models.length === 0 ? buildSupports(pool, zOff) : [];
+      const built = models.length === 0
+        ? buildSupports(pool, zOff)
+        : { supports: [], braces: [] };
+      const { supports, braces } = built;
 
       models.push({
         index: i,
         filename: meshChunks.length === 1 ? sourceName : `${sourceName}_${i + 1}`,
         geometry: positionsToGeometry(positions),
         supports,
-        braces: [],
+        braces,
         twigs: [],
         junctionBranches: [],
         // The 0x54 `position` is NOT a plate translation: mesh vertices are
@@ -473,7 +505,7 @@ export class CtpParser {
 
       console.debug(
         `${LOG_PREFIX} object ${i}: ${positions.length / 9} triangle(s), `
-        + `${supports.length} support(s).`,
+        + `${supports.length} support(s), ${braces.length} brace(s).`,
       );
     }
 
