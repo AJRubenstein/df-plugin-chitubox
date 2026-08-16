@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { CbxBrace, CbxModelInput, CbxSupport } from './CbxConverter';
+import type { CbxBrace, CbxJunctionBranch, CbxModelInput, CbxSupport } from './CbxConverter';
 
 /**
  * Parser for `.ctp` (ChiTuBox **Pro**) project files.
@@ -295,13 +295,15 @@ function readSupportPool(view: DataView, bytes: Uint8Array, len: number): CtpPoo
 function buildSupports(
   records: CtpPoolRecord[],
   zOff: number,
-): { supports: CbxSupport[]; braces: CbxBrace[] } {
+): { supports: CbxSupport[]; braces: CbxBrace[]; junctionBranches: CbxJunctionBranch[] } {
   // Authored joints meet to a few thousandths; parts of one support share an XY
   // to float noise. Both tolerances are far below the spacing between supports.
   const Z_EPS = 0.05;
   const XY_EPS = 0.05;
   // A tip's socket lands on its knot centre this closely.
   const TIP_Z_TOL = 0.1;
+  // Tips fan out from a junction knot, so they start near it but not on its axis.
+  const TIP_FAN_XY = 1.0;
 
   const isBrace = (r: CtpPoolRecord) =>
     r.role === ROLE_PILLAR && Math.hypot(r.x - r.x2, r.y - r.y2) > BRACE_XY_MIN;
@@ -450,7 +452,55 @@ function buildSupports(
     diameter: b.paramA * 2,
   }));
 
-  return { supports, braces };
+  // Some knots sit on top of a BRACE rather than a vertical pillar: the brace
+  // acts as a branch shaft carrying its own knot and contact tips. Those tips
+  // match no pillar chain, so without this they are dropped -- 17 of 135 on
+  // lily_Arm_L. Emit them as junction branches parented to the brace's far end.
+  const junctionBranches: CbxJunctionBranch[] = [];
+  const claimed = new Set(supports.flatMap((sup) => sup.tips));
+
+  for (const brace of braceRecords) {
+    const knot = knots.find((k) =>
+      Math.hypot(k.x - brace.x, k.y - brace.y) <= XY_EPS
+      && Math.abs((k.topZ + k.botZ) / 2 - brace.topZ) <= TIP_Z_TOL);
+    if (!knot) continue;
+
+    const centre = (knot.topZ + knot.botZ) / 2;
+    const branchTips = tips.filter((t) =>
+      Math.abs(t.botZ - centre) <= TIP_Z_TOL
+      && Math.hypot(t.x - knot.x, t.y - knot.y) <= TIP_FAN_XY);
+    if (branchTips.length === 0) continue;
+
+    junctionBranches.push({
+      junctionX: brace.x,
+      junctionY: brace.y,
+      junctionZ: brace.topZ + zOff,
+      parentX: brace.x2,
+      parentY: brace.y2,
+      parentZ: brace.botZ + zOff,
+      diameter: brace.paramA * 2,
+      tips: branchTips.map((tip) => {
+        const dx = tip.x - tip.x2;
+        const dy = tip.y - tip.y2;
+        const dz = tip.topZ - tip.botZ;
+        return {
+          x: tip.x,
+          y: tip.y,
+          contactZ: tip.topZ + zOff,
+          attachZ: tip.botZ + zOff,
+          socketX: tip.x2,
+          socketY: tip.y2,
+          length: Math.sqrt(dx * dx + dy * dy + dz * dz),
+          contactDiameter: tip.paramA * 2,
+          bodyDiameter: tip.paramB * 2,
+          contactDepth: tip.extra,
+        };
+      }),
+    });
+  }
+
+  void claimed;
+  return { supports, braces, junctionBranches };
 }
 
 export interface ParsedCtpContainer {
@@ -519,8 +569,8 @@ export class CtpParser {
         : null;
       const built = models.length === 0
         ? buildSupports(pool, zOff)
-        : { supports: [], braces: [] };
-      const { supports, braces } = built;
+        : { supports: [], braces: [], junctionBranches: [] };
+      const { supports, braces, junctionBranches } = built;
 
       models.push({
         index: i,
@@ -529,7 +579,7 @@ export class CtpParser {
         supports,
         braces,
         twigs: [],
-        junctionBranches: [],
+        junctionBranches,
         // The 0x54 `position` is NOT a plate translation: mesh vertices are
         // already authored in plate space (every sample centres on the origin
         // to within 0.005mm, whatever that field says), and the supports share
