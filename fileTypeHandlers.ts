@@ -293,14 +293,28 @@ async function importCtpFile(file: File): Promise<CbxImportPayload[]> {
   return parsed.models.map((model, index) => {
     const importedModelId = uuidv4();
     const geometry = model.geometry ?? new THREE.BufferGeometry();
-    const plateX = model.transform?.plateX ?? 0;
-    const plateY = model.transform?.plateY ?? 0;
     // Supports were shifted by parsed.zOffset to seat the lowest foot on the
     // plate. The mesh is authored in that same frame, so it needs the identical
     // shift -- without it the model floats exactly zOffset above its supports.
     const liftZ = parsed.zOffset > 0
       ? parsed.zOffset
       : (model.transform?.liftZ ?? 0);
+
+    // The host centres the geometry bbox at transform.position, so adding the
+    // bbox centre back cancels that and leaves the mesh in its authored frame,
+    // where the supports already are.
+    let centerX = 0;
+    let centerY = 0;
+    let centerZ = 0;
+    if (geometry.getAttribute('position')?.count) {
+      geometry.computeBoundingBox();
+      const box = geometry.boundingBox;
+      if (box) {
+        centerX = (box.max.x + box.min.x) / 2;
+        centerY = (box.max.y + box.min.y) / 2;
+        centerZ = (box.max.z + box.min.z) / 2;
+      }
+    }
 
     let dragonfruitData = model.supports.length > 0
       ? CbxConverter.convert(model, settings)
@@ -314,7 +328,7 @@ async function importCtpFile(file: File): Promise<CbxImportPayload[]> {
       name: deriveModelName(model.filename, index),
       geometry,
       transform: {
-        position: new THREE.Vector3(plateX, plateY, liftZ),
+        position: new THREE.Vector3(centerX, centerY, centerZ + liftZ),
         rotation: new THREE.Euler(0, 0, 0),
         scale: new THREE.Vector3(1, 1, 1),
       },

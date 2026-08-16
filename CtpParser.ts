@@ -459,9 +459,14 @@ export class CtpParser {
         braces: [],
         twigs: [],
         junctionBranches: [],
+        // The 0x54 `position` is NOT a plate translation: mesh vertices are
+        // already authored in plate space (every sample centres on the origin
+        // to within 0.005mm, whatever that field says), and the supports share
+        // that frame. Passing it through shifted models ~80mm off the bed while
+        // their supports stayed put. Only the Z lift is applied.
         transform: {
-          plateX: transform?.position.x ?? 0,
-          plateY: transform?.position.y ?? 0,
+          plateX: 0,
+          plateY: 0,
           liftZ: transform?.liftZ ?? 0,
         },
       });
