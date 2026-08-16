@@ -58,6 +58,15 @@ const BRACE_HOST_XY = 0.5;
 /** Authored pillars shorter than this are degenerate slivers, not real parts. */
 const MIN_PILLAR_LENGTH = 0.5;
 
+/**
+ * A role-1 record whose endpoints differ in XY by more than this, and whose two
+ * radii are equal, is a diagonal strut between supports rather than a contact
+ * cone. Real contact tips taper (0.10 -> 0.40) and carry a role-7 contact ball
+ * centred on their top; these carry neither. Four of lily_Arm_L's 139 role-1
+ * records are struts of this kind.
+ */
+const TIP_STRUT_XY_MIN = 0.5;
+
 function u32(view: DataView, off: number): number {
   return view.getUint32(off, true);
 }
@@ -297,12 +306,20 @@ function buildSupports(
   const isBrace = (r: CtpPoolRecord) =>
     r.role === ROLE_PILLAR && Math.hypot(r.x - r.x2, r.y - r.y2) > BRACE_XY_MIN;
 
+  // Role 1 covers both model contacts and support-to-support struts. A contact
+  // tapers from a narrow contact end to a wider body; a strut has equal radii
+  // and runs diagonally between two supports.
+  const isTipStrut = (r: CtpPoolRecord) =>
+    r.role === ROLE_TIP
+    && Math.abs(r.paramA - r.paramB) < 1e-3
+    && Math.hypot(r.x - r.x2, r.y - r.y2) > TIP_STRUT_XY_MIN;
+
   const byRole = (role: number) => records.filter((r) => r.role === role);
   const pillars = byRole(ROLE_PILLAR).filter((r) => !isBrace(r));
   const knots = byRole(ROLE_KNOT);
   const bases = byRole(ROLE_BASE);
   const feet = byRole(ROLE_FOOT);
-  const tips = byRole(ROLE_TIP);
+  const tips = byRole(ROLE_TIP).filter((r) => !isTipStrut(r));
 
   const xyNear = (a: CtpPoolRecord, b: CtpPoolRecord, tol = XY_EPS) =>
     Math.hypot(a.x - b.x, a.y - b.y) <= tol;
@@ -423,7 +440,7 @@ function buildSupports(
   // 188 of 200 sampled braces land both endpoints on a real pillar. Unlike the
   // Basic format, where bracing has to be inferred, Pro stores them explicitly,
   // so they are passed straight through.
-  const braces: CbxBrace[] = records.filter(isBrace).map((b) => ({
+  const braces: CbxBrace[] = [...records.filter(isBrace), ...records.filter(isTipStrut)].map((b) => ({
     ax: b.x,
     ay: b.y,
     az: b.topZ + zOff,
