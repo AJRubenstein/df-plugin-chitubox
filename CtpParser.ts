@@ -466,9 +466,12 @@ function buildSupports(
     if (!knot) continue;
 
     const centre = (knot.topZ + knot.botZ) / 2;
+    // A tip meets its knot at the socket end (x2/y2), not at its contact point:
+    // the contact fans out to the model, so measuring from t.x/t.y misses tips
+    // whose contact is over a millimetre away from the knot they hang on.
     const branchTips = tips.filter((t) =>
       Math.abs(t.botZ - centre) <= TIP_Z_TOL
-      && Math.hypot(t.x - knot.x, t.y - knot.y) <= TIP_FAN_XY);
+      && Math.hypot(t.x2 - knot.x, t.y2 - knot.y) <= TIP_FAN_XY);
     if (branchTips.length === 0) continue;
 
     junctionBranches.push({
