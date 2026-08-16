@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { PluginFileTypeHandler } from '@/features/plugins/pluginFileTypeBridge';
 import type { PluginFileTypeDefinition } from '@/features/plugins/complexPluginContracts';
 import { CbxParser } from './CbxParser';
+import { CtpParser } from './CtpParser';
 import { CbxConverter, computeRaftZ, type CbxModelInput } from './CbxConverter';
 import { createDefaultSettings } from '@/supports/Settings/types';
 import { v4 as uuidv4 } from 'uuid';
@@ -276,9 +277,49 @@ function deriveModelName(filename: string | null | undefined, index: number): st
 // Core import function (plain async — no React state)
 // ---------------------------------------------------------------------------
 
+/**
+ * Import a ChiTuBox **Pro** (`.ctp`) container.
+ *
+ * Geometry and the authored plate transform are recovered; supports are not yet
+ * rebuilt (see CtpParser.buildSupports), so `supportData` is null and models
+ * arrive unsupported.
+ */
+async function importCtpFile(file: File): Promise<CbxImportPayload[]> {
+  console.log('[chitubox-import] Starting Ctp import...');
+  const parsed = await CtpParser.parse(file);
+  const settings = createDefaultSettings();
+
+  return parsed.models.map((model, index) => {
+    const geometry = model.geometry ?? new THREE.BufferGeometry();
+    const plateX = model.transform?.plateX ?? 0;
+    const plateY = model.transform?.plateY ?? 0;
+    const liftZ = model.transform?.liftZ ?? 0;
+
+    return {
+      modelId: uuidv4(),
+      name: deriveModelName(model.filename, index),
+      geometry,
+      transform: {
+        position: new THREE.Vector3(plateX, plateY, liftZ),
+        rotation: new THREE.Euler(0, 0, 0),
+        scale: new THREE.Vector3(1, 1, 1),
+      },
+      supportData: null,
+    } satisfies CbxImportPayload;
+  });
+}
+
 export async function importCbxFile(
   file: File,
 ): Promise<CbxImportPayload | CbxImportPayload[]> {
+  // Route on magic rather than extension: the two ChiTuBox containers are
+  // distinguished by their first four bytes, and a mislabelled file should
+  // still import correctly.
+  const head = new DataView(await file.slice(0, 4).arrayBuffer());
+  if (head.byteLength >= 4 && CtpParser.matches(head, head.byteLength)) {
+    return importCtpFile(file);
+  }
+
   console.log('[chitubox-import] Starting Cbx import...');
   const parsed = await CbxParser.parse(file);
 

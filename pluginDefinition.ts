@@ -47,6 +47,17 @@ const PLUGIN_DEFINITION: ComplexPluginDefinition = {
         storageKey: 'dragonfruit.chituboxImportWarningDismissed',
       },
     },
+    {
+      fileExtension: '.ctp',
+      mimeType: 'application/octet-stream',
+      displayName: 'CTP Project',
+      isSceneFile: true,
+      importWarning: {
+        title: 'Chitubox Pro Import',
+        body: 'Chitubox Pro (.ctp) import currently recovers model geometry and plate position. Supports are not yet rebuilt, so models import unsupported.',
+        storageKey: 'dragonfruit.ctpImportWarningDismissed',
+      },
+    },
   ],
   sceneOverlayLoader: () =>
     import('./GhostOverlay').then((module) => ({ default: module.GhostOverlay })),
