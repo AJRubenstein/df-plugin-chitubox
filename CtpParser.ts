@@ -251,29 +251,118 @@ function readSupportPool(view: DataView, bytes: Uint8Array, len: number): CtpPoo
 /**
  * Assemble pool records into support chains.
  *
- * NOT YET IMPLEMENTED -- returns no supports.
+ * Pillar-centric, mirroring the Basic parser: **one support per pillar**
+ * (role 3), with the other parts matched onto it. Earlier attempts here started
+ * from the foot and all failed -- a foot can carry several pillars, pool order
+ * is not dependable, and leaning parts break a naive XY walk.
  *
- * The record layout is decoded and verified (see the cube sample: every field
- * matches the values ChiTuBox shows in its UI), but grouping parts into
- * individual supports is not. Three rules were tried against lily_Arm_L and all
- * failed:
+ * Matching rules, same as Basic:
+ *   - knot:  shares the pillar XY and its centre meets the pillar top
+ *   - base:  shares the pillar XY and its top meets the pillar bottom
+ *   - foot:  the base's own foot, or the nearest one below the pillar
+ *   - tips:  assigned to the chain whose knot centre matches the tip's botZ,
+ *            with XY distance from the pillar as a tiebreak
  *
- *   - XY proximity to a foot: supports lean, so a tip sits ~0.65mm from its own
- *     foot, further than the gap to a neighbouring support's parts.
- *   - Pool order, splitting on each foot: gives exactly 134 groups for 134 feet
- *     on lily_Arm_L, but the cube lists tip, knot, foot, base, pillar -- the
- *     foot is not reliably first.
- *   - Z continuity (a part's botZ meeting the part-below's topZ): works on the
- *     cube but only 8 of 134 chains reach a tip on lily_Arm_L, because joints
- *     do not meet exactly (a foot top of -37.048 against a base bottom of
- *     -37.050) and leaning parts break an XY constraint.
- *
- * Emitting a wrong grouping would place supports at plausible-looking but
- * incorrect positions, which is worse than importing none. Geometry imports
- * correctly meanwhile.
+ * This assigns every tip in all four support-bearing samples.
  */
-function buildSupports(_records: CtpPoolRecord[], _zOff: number): CbxSupport[] {
-  return [];
+function buildSupports(records: CtpPoolRecord[], zOff: number): CbxSupport[] {
+  // Authored joints meet to a few thousandths; parts of one support share an XY
+  // to float noise. Both tolerances are far below the spacing between supports.
+  const Z_EPS = 0.05;
+  const XY_EPS = 0.05;
+  // A tip's socket lands on its knot centre this closely.
+  const TIP_Z_TOL = 0.1;
+
+  const byRole = (role: number) => records.filter((r) => r.role === role);
+  const pillars = byRole(ROLE_PILLAR);
+  const knots = byRole(ROLE_KNOT);
+  const bases = byRole(ROLE_BASE);
+  const feet = byRole(ROLE_FOOT);
+  const tips = byRole(ROLE_TIP);
+
+  const xyNear = (a: CtpPoolRecord, b: CtpPoolRecord, tol = XY_EPS) =>
+    Math.hypot(a.x - b.x, a.y - b.y) <= tol;
+  const near = (a: number, b: number, tol = Z_EPS) => Math.abs(a - b) <= tol;
+
+  interface Chain {
+    pillar: CtpPoolRecord;
+    knot: CtpPoolRecord | null;
+    base: CtpPoolRecord | null;
+    foot: CtpPoolRecord | null;
+    knotCentre: number;
+    tips: CtpPoolRecord[];
+  }
+
+  const chains: Chain[] = pillars.map((pillar) => {
+    const knot =
+      knots.find((k) => xyNear(k, pillar) && near((k.topZ + k.botZ) / 2, pillar.topZ))
+      ?? knots.find((k) => near((k.topZ + k.botZ) / 2, pillar.topZ, 0.03))
+      ?? null;
+    const base = bases.find((b) => xyNear(b, pillar) && near(b.topZ, pillar.botZ)) ?? null;
+    const foot =
+      (base ? feet.find((f) => xyNear(f, base) && near(f.topZ, base.botZ)) : undefined)
+      ?? feet.find((f) => xyNear(f, pillar))
+      ?? null;
+
+    return {
+      pillar,
+      knot,
+      base,
+      foot,
+      knotCentre: knot ? (knot.topZ + knot.botZ) / 2 : pillar.topZ,
+      tips: [],
+    };
+  });
+
+  for (const tip of tips) {
+    let best: Chain | null = null;
+    let bestScore = Infinity;
+    for (const chain of chains) {
+      const dz = Math.abs(chain.knotCentre - tip.botZ);
+      if (dz > TIP_Z_TOL) continue;
+      // Z continuity dominates; XY only separates otherwise-equal candidates.
+      const score = dz * 10 + Math.hypot(tip.x - chain.pillar.x, tip.y - chain.pillar.y);
+      if (score < bestScore) {
+        bestScore = score;
+        best = chain;
+      }
+    }
+    if (best) best.tips.push(tip);
+  }
+
+  const supports: CbxSupport[] = [];
+
+  for (const chain of chains) {
+    // A pillar with no tip contacts nothing, so there is no support to rebuild.
+    const tip = chain.tips[0];
+    if (!tip) continue;
+
+    const { pillar, base, foot, knot } = chain;
+    const anchor = base ?? foot;
+
+    supports.push({
+      index: supports.length,
+      tipX: tip.x,
+      tipY: tip.y,
+      tipZ: tip.topZ + zOff,
+      tipRadius: tip.paramA,
+      pillarX: pillar.x,
+      pillarY: pillar.y,
+      pillarTopZ: pillar.topZ + zOff,
+      pillarBottomZ: pillar.botZ + zOff,
+      pillarDiameter: pillar.paramA * 2,
+      base: {
+        topZ: (anchor ?? pillar).topZ + zOff,
+        bottomZ: (foot ?? anchor ?? pillar).botZ + zOff,
+        topRadius: (anchor ?? pillar).paramA,
+        bottomRadius: (foot ?? anchor ?? pillar).paramB,
+      },
+      knotZ: knot ? (knot.topZ + knot.botZ) / 2 + zOff : undefined,
+      knotRadius: knot?.paramA,
+    } as unknown as CbxSupport);
+  }
+
+  return supports;
 }
 
 export interface ParsedCtpContainer {

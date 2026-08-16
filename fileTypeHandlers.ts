@@ -280,9 +280,10 @@ function deriveModelName(filename: string | null | undefined, index: number): st
 /**
  * Import a ChiTuBox **Pro** (`.ctp`) container.
  *
- * Geometry and the authored plate transform are recovered; supports are not yet
- * rebuilt (see CtpParser.buildSupports), so `supportData` is null and models
- * arrive unsupported.
+ * Geometry, the authored plate transform, and parametric supports are all
+ * recovered. Supports are rebuilt from the pool by CtpParser and converted by
+ * the same CbxConverter the Basic path uses, so they arrive as editable
+ * DragonFruit primitives rather than baked mesh.
  */
 async function importCtpFile(file: File): Promise<CbxImportPayload[]> {
   console.log('[chitubox-import] Starting Ctp import...');
@@ -290,13 +291,21 @@ async function importCtpFile(file: File): Promise<CbxImportPayload[]> {
   const settings = createDefaultSettings();
 
   return parsed.models.map((model, index) => {
+    const importedModelId = uuidv4();
     const geometry = model.geometry ?? new THREE.BufferGeometry();
     const plateX = model.transform?.plateX ?? 0;
     const plateY = model.transform?.plateY ?? 0;
     const liftZ = model.transform?.liftZ ?? 0;
 
+    let dragonfruitData = model.supports.length > 0
+      ? CbxConverter.convert(model, settings)
+      : null;
+    if (dragonfruitData) {
+      CbxConverter.reassignModelId(dragonfruitData, importedModelId);
+    }
+
     return {
-      modelId: uuidv4(),
+      modelId: importedModelId,
       name: deriveModelName(model.filename, index),
       geometry,
       transform: {
@@ -304,7 +313,7 @@ async function importCtpFile(file: File): Promise<CbxImportPayload[]> {
         rotation: new THREE.Euler(0, 0, 0),
         scale: new THREE.Vector3(1, 1, 1),
       },
-      supportData: null,
+      supportData: dragonfruitData,
     } satisfies CbxImportPayload;
   });
 }

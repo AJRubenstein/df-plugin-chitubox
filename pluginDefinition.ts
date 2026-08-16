@@ -54,7 +54,7 @@ const PLUGIN_DEFINITION: ComplexPluginDefinition = {
       isSceneFile: true,
       importWarning: {
         title: 'Chitubox Pro Import',
-        body: 'Chitubox Pro (.ctp) import currently recovers model geometry and plate position. Supports are not yet rebuilt, so models import unsupported.',
+        body: 'Chitubox Pro import converts Chitubox Pro project data into DragonFruit format. Support placement may differ from the original scene, and model rotation is not yet applied.',
         storageKey: 'dragonfruit.ctpImportWarningDismissed',
       },
     },
