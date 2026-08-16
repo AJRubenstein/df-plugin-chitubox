@@ -512,7 +512,12 @@ function parseSupportBlock(
     if (baseZ - plateZ <= MID_AIR_MM) return false; // grounded, not mid-air
     if (c.base) return false; // has its own base pad → genuinely grounded support
     if (footBottomFor(c.pillar.x, c.pillar.y) !== null) return false; // sits on a foot
-    return convergingBraceCount(c.pillar.x, c.pillar.y, c.pillar.botZ) >= 2;
+    // Airborne with no pad and no foot: a branch, not a trunk. Converging braces
+    // are the usual reason (a fork junction), but a pillar can also stand
+    // directly on the model surface with nothing feeding it -- CriosphinxHead
+    // has one starting 21mm up. Either way a grounded trunk would plant a root
+    // cup in mid-air, which the support model never allows.
+    return true;
   };
 
   // Materialize into CbxSupport records.
