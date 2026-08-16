@@ -175,15 +175,27 @@ function buildStick(
     synthTipSettings(upTip, shaftDiameter), tipDefaults, mesh,
     false, false, null, true,
   );
-  // enforceSocketBelowTip must be OFF for the downward cone. It picks whichever
-  // socket candidate sits BELOW the contact, which is right for a cone reaching
-  // up to the model but inverted here: this cone points down, so its socket is
-  // ABOVE its contact. Leaving it on flipped the cone away from the surface and
-  // left the contact disk floating.
+  // The downward cone needs its AUTHORED axis. Left to infer one,
+  // createContactAssembly solves the socket from the tip length and puts it
+  // BELOW the contact -- correct for a cone reaching up to the model, inverted
+  // here -- so the cone pointed the wrong way, the disk floated clear of the
+  // surface, and the body was stretched and slanted to reach it.
+  //
+  // The record gives both endpoints exactly: the socket sits on the pillar
+  // bottom (0.0000 away in XY and Z) and the contact is 26.8 degrees off
+  // vertical from there. Pass that direction as the authored normal, with
+  // preferAuthoredNormal on, so the body stays vertical and only the short cone
+  // tilts -- matching how Chitubox draws it.
+  const downAxis = new THREE.Vector3(
+    down.socketX - down.x,
+    down.socketY - down.y,
+    z(down.attachZ) - z(down.contactZ),
+  ).normalize();
   const assemblyB = createContactAssembly(
-    synthSupportForTip(down, hubBottom), contactB, hubBottom,
+    { ...synthSupportForTip(down, hubBottom), tipNormal: { x: downAxis.x, y: downAxis.y, z: downAxis.z } },
+    contactB, hubBottom,
     synthTipSettings(down, shaftDiameter), tipDefaults, mesh,
-    false, false, null, false,
+    true, false, null, false,
   );
 
   const jointA: Joint = { id: uuidv4(), pos: hubTop, diameter: getJointDiameter(shaftDiameter) };
