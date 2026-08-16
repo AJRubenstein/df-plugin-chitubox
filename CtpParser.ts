@@ -52,6 +52,12 @@ const POOL_STRIDE = 48;
  */
 const BRACE_XY_MIN = 0.3;
 
+/** How close a brace endpoint must be to a pillar's XY to count as attached. */
+const BRACE_HOST_XY = 0.5;
+
+/** Authored pillars shorter than this are degenerate slivers, not real parts. */
+const MIN_PILLAR_LENGTH = 0.5;
+
 function u32(view: DataView, off: number): number {
   return view.getUint32(off, true);
 }
@@ -348,11 +354,27 @@ function buildSupports(
     if (best) best.tips.push(tip);
   }
 
+  const braceRecords = records.filter(isBrace);
+
+  /**
+   * True when a brace lands on this pillar's shaft. Such a pillar is a
+   * structural brace host -- it never touches the model, but dropping it takes
+   * the whole lattice with it (one column on lily_Arm_L carries 56 braces).
+   */
+  const hostsBrace = (pillar: CtpPoolRecord) =>
+    braceRecords.some((b) =>
+      Math.hypot(b.x - pillar.x, b.y - pillar.y) <= BRACE_HOST_XY
+      || Math.hypot(b.x2 - pillar.x, b.y2 - pillar.y) <= BRACE_HOST_XY);
+
   const supports: CbxSupport[] = [];
 
   for (const chain of chains) {
-    // A pillar with no tip contacts nothing, so there is no support to rebuild.
-    if (chain.tips.length === 0) continue;
+    // A tipless pillar that also hosts no brace is an interior strut that
+    // neither contacts the model nor anchors anything, so there is nothing to
+    // rebuild. One that hosts braces is kept as a contactless column.
+    if (chain.tips.length === 0 && !hostsBrace(chain.pillar)) continue;
+    // Degenerate slivers (authored zero-length records) are not real parts.
+    if (Math.abs(chain.pillar.topZ - chain.pillar.botZ) < MIN_PILLAR_LENGTH) continue;
 
     const { pillar, base, foot, knot } = chain;
     // The pad spans from whichever part sits under the pillar down to the foot.
