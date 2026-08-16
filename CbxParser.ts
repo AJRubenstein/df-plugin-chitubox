@@ -192,7 +192,26 @@ function parseSupportBlock(
     const base = recBase + i * REC_SIZE;
     if (u32(view, base) !== TAG_EA) continue;
     const rec = readRecord(view, base);
-    if (rec.sub === MODEL_HDR_SUB || rec.sub === SUMMARY_SUB) continue;
+    if (rec.sub === SUMMARY_SUB) continue;
+    if (rec.sub === MODEL_HDR_SUB) {
+      // Sub-2 is usually a model header with no geometry, but it also carries
+      // the DOWNWARD contact cone that anchors a support standing on the model:
+      // same field layout and radius pair as a sub-1 tip, just inverted, with
+      // the narrow contact end below the wide socket. Without it a mid-air
+      // branch hangs attached to nothing.
+      //
+      // Only a record whose endpoints actually describe a cone qualifies; a
+      // real header has no such span.
+      const spans = Math.abs(rec.topZ - rec.botZ) > 0.05 && rec.paramA > 0 && rec.paramB > 0;
+      if (!spans) continue;
+      // No re-orientation is needed: the fields already follow the tip
+      // convention. (x, y, topZ) is the narrow contact end -- here below the
+      // socket, because this cone points DOWN onto the model -- and
+      // (x2, y2, botZ) is the wide socket, which lands exactly on the knot the
+      // branch hangs from. The chain builder matches a tip by its botZ, so it
+      // attaches correctly as-is.
+      rec.sub = TIP_SUB;
+    }
     // Shift Z into world frame up front so all continuity math is in one frame.
     rec.topZ += zOff;
     rec.botZ += zOff;
