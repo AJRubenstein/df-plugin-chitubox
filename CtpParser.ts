@@ -212,6 +212,8 @@ interface CtpPoolRecord {
   paramA: number;
   /** Radius at the bottom. */
   paramB: number;
+  /** Trailing field; carries the tip's penetration depth into the model. */
+  extra: number;
 }
 
 function readPoolRecord(view: DataView, off: number): CtpPoolRecord {
@@ -226,6 +228,7 @@ function readPoolRecord(view: DataView, off: number): CtpPoolRecord {
     botZ: f32(view, off + 28),
     paramA: f32(view, off + 32),
     paramB: f32(view, off + 36),
+    extra: f32(view, off + 40),
   };
 }
 
@@ -334,32 +337,49 @@ function buildSupports(records: CtpPoolRecord[], zOff: number): CbxSupport[] {
 
   for (const chain of chains) {
     // A pillar with no tip contacts nothing, so there is no support to rebuild.
-    const tip = chain.tips[0];
-    if (!tip) continue;
+    if (chain.tips.length === 0) continue;
 
     const { pillar, base, foot, knot } = chain;
-    const anchor = base ?? foot;
+    // The pad spans from whichever part sits under the pillar down to the foot.
+    const padTop = base ?? foot;
+    const padBottom = foot ?? base;
 
     supports.push({
-      index: supports.length,
-      tipX: tip.x,
-      tipY: tip.y,
-      tipZ: tip.topZ + zOff,
-      tipRadius: tip.paramA,
-      pillarX: pillar.x,
-      pillarY: pillar.y,
+      pillarDiameter: pillar.paramA * 2,
       pillarTopZ: pillar.topZ + zOff,
       pillarBottomZ: pillar.botZ + zOff,
-      pillarDiameter: pillar.paramA * 2,
-      base: {
-        topZ: (anchor ?? pillar).topZ + zOff,
-        bottomZ: (foot ?? anchor ?? pillar).botZ + zOff,
-        topRadius: (anchor ?? pillar).paramA,
-        bottomRadius: (foot ?? anchor ?? pillar).paramB,
-      },
-      knotZ: knot ? (knot.topZ + knot.botZ) / 2 + zOff : undefined,
-      knotRadius: knot?.paramA,
-    } as unknown as CbxSupport);
+      pillarX: pillar.x,
+      pillarY: pillar.y,
+      knotCenterZ: chain.knotCentre + zOff,
+      knotDiameter: (knot?.paramA ?? pillar.paramA) * 2,
+      base: padTop && padBottom
+        ? {
+            topRadius: padTop.paramA,
+            bottomRadius: padBottom.paramB,
+            topZ: padTop.topZ + zOff,
+            bottomZ: padBottom.botZ + zOff,
+          }
+        : null,
+      tips: chain.tips.map((tip) => {
+        // Cone length is the full 3D contact-to-socket distance, not the Z gap:
+        // slanted tips are common and a Z-only length badly understates them.
+        const dx = tip.x - tip.x2;
+        const dy = tip.y - tip.y2;
+        const dz = tip.topZ - tip.botZ;
+        return {
+          x: tip.x,
+          y: tip.y,
+          contactZ: tip.topZ + zOff,
+          attachZ: tip.botZ + zOff,
+          socketX: tip.x2,
+          socketY: tip.y2,
+          length: Math.sqrt(dx * dx + dy * dy + dz * dz),
+          contactDiameter: tip.paramA * 2,
+          bodyDiameter: tip.paramB * 2,
+          contactDepth: tip.extra,
+        };
+      }),
+    });
   }
 
   return supports;
