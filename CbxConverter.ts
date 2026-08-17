@@ -794,15 +794,52 @@ export class CbxConverter {
     const modelBraces = model.braces ?? [];
     let bracesAttached = 0;
     let bracesDropped = 0;
-    const nearestShaft = (x: number, y: number): ShaftRef | null => {
+    /**
+     * Resolve the pillar a brace endpoint attaches to.
+     *
+     * XY alone is NOT enough. On stacked-tier models (Supported_Chest_Back) 148 of
+     * 534 brace endpoints have two or more pillars inside the 1mm XY tolerance --
+     * tiers sitting almost directly above one another, e.g. z-spans
+     * [-50.48..-40.37] and [-43.30..-39.95] at the same XY. Picking by XY distance
+     * alone can bind the endpoint to the wrong tier, and the brace then stretches
+     * from its authored end to a shaft somewhere else entirely: the "really long
+     * super brace" artefact. Authored braces on this model are all short 45deg
+     * struts (max dXY 6.28mm, dz == dXY), so any long result is manufactured.
+     *
+     * Scoring the endpoint in 3D against each candidate's actual SEGMENTS picks the
+     * tier that truly contains it, because a pillar whose Z span excludes the
+     * endpoint scores its (large) distance to the nearer segment end.
+     */
+    const nearestShaft = (x: number, y: number, z?: number): ShaftRef | null => {
       let best: ShaftRef | null = null;
       let bestD = Infinity;
       for (const r of shaftRefs) {
-        const d = (r.px - x) ** 2 + (r.py - y) ** 2;
+        const dxy = (r.px - x) ** 2 + (r.py - y) ** 2;
+        // Reject anything outside the XY tolerance first (unchanged behaviour).
+        if (dxy > CBX_BRACE_ATTACH_TOL_MM * CBX_BRACE_ATTACH_TOL_MM) continue;
+        // Within tolerance, rank by true 3D distance to the pillar's segments so
+        // the correct TIER wins rather than whichever is marginally closer in XY.
+        let d = dxy;
+        if (z !== undefined) {
+          d = Infinity;
+          for (const seg of r.segments) {
+            const ax = seg.start.x, ay = seg.start.y, az = seg.start.z;
+            const bx = seg.end.x, by = seg.end.y, bz = seg.end.z;
+            const abx = bx - ax, aby = by - ay, abz = bz - az;
+            const abLenSq = abx * abx + aby * aby + abz * abz;
+            let t = 0;
+            if (abLenSq > 1e-8) {
+              t = ((x - ax) * abx + (y - ay) * aby + (z - az) * abz) / abLenSq;
+              t = t < 0 ? 0 : t > 1 ? 1 : t;
+            }
+            const cx = ax + abx * t, cy = ay + aby * t, cz = az + abz * t;
+            const dd = (cx - x) ** 2 + (cy - y) ** 2 + (cz - z) ** 2;
+            if (dd < d) d = dd;
+          }
+        }
         if (d < bestD) { bestD = d; best = r; }
       }
-      // Only accept a match within a small radius (endpoints sit on pillar XY).
-      return best && bestD <= CBX_BRACE_ATTACH_TOL_MM * CBX_BRACE_ATTACH_TOL_MM ? best : null;
+      return best;
     };
 
     // Project a world point onto a pillar's segments and return the closest one,
@@ -835,8 +872,9 @@ export class CbxConverter {
     };
 
     for (const b of modelBraces) {
-      const shaftA = nearestShaft(b.ax, b.ay);
-      const shaftB = nearestShaft(b.bx, b.by);
+      // Pass Z so a stacked tier cannot be mis-picked (see nearestShaft).
+      const shaftA = nearestShaft(b.ax, b.ay, b.az - raftZ);
+      const shaftB = nearestShaft(b.bx, b.by, b.bz - raftZ);
       if (!shaftA || !shaftB || shaftA === shaftB) {
         bracesDropped++;
         continue;
@@ -871,8 +909,31 @@ export class CbxConverter {
         diameter: jointDiameter,
         _importHint: 'braceImported',
       };
-      knots.push(knotA, knotB);
+      // Sanity: a rebuilt brace must stay close to its AUTHORED span. The knots
+      // are projected onto their host shafts, so a mis-resolved tier shows up as a
+      // rebuilt strut far longer than the record describes. Authored braces on
+      // these files are short 45deg struts (Supported_Chest_Back: max 6.28mm), so
+      // a large overshoot means the endpoint bound to the wrong pillar -- drop it
+      // rather than draw a girder across the model.
+      const authoredLen = Math.hypot(
+        endpointB.x - endpointA.x, endpointB.y - endpointA.y, endpointB.z - endpointA.z,
+      );
+      const builtLen = Math.hypot(
+        projB.pos.x - projA.pos.x, projB.pos.y - projA.pos.y, projB.pos.z - projA.pos.z,
+      );
+      if (builtLen > authoredLen * 2 + 2) {
+        if (CBX_DEBUG) {
+          cbxDebug(
+            `BRACE-REJECT authored=${authoredLen.toFixed(2)}mm built=${builtLen.toFixed(2)}mm `
+            + `A=(${endpointA.x.toFixed(2)},${endpointA.y.toFixed(2)},${endpointA.z.toFixed(2)}) `
+            + `B=(${endpointB.x.toFixed(2)},${endpointB.y.toFixed(2)},${endpointB.z.toFixed(2)})`,
+          );
+        }
+        bracesDropped++;
+        continue;
+      }
 
+      knots.push(knotA, knotB);
       braces.push({
         id: uuidv4(),
         modelId: placeholderModelId,
@@ -900,8 +961,10 @@ export class CbxConverter {
     // off-model contact.
     let supportBracesEmitted = 0;
     for (const pb of pendingSupportBraces) {
-      const targetShaft = nearestShaft(pb.targetPillarX, pb.targetPillarY);
-      const sourceShaft = nearestShaft(pb.sourcePillarX, pb.sourcePillarY);
+      // The authored contact height is the attach Z for both ends of this strut,
+      // so use it to disambiguate stacked tiers (see nearestShaft).
+      const targetShaft = nearestShaft(pb.targetPillarX, pb.targetPillarY, pb.contact.z);
+      const sourceShaft = nearestShaft(pb.sourcePillarX, pb.sourcePillarY, pb.contact.z);
       if (!targetShaft || !sourceShaft || targetShaft === sourceShaft) {
         continue;
       }
@@ -1087,7 +1150,7 @@ export class CbxConverter {
 
       // Parent the branch to the grounded pillar's shaft at the parent point. If
       // no shaft resolves there, skip (can't attach a free-floating branch).
-      const parentRef = nearestShaft(parentPos.x, parentPos.y);
+      const parentRef = nearestShaft(parentPos.x, parentPos.y, parentPos.z);
       if (!parentRef) { junctionDropped++; continue; }
       const proj = projectToShaft(parentRef, parentPos);
       const parentKnot: Knot = {
