@@ -79,6 +79,14 @@ export function synthTipSettings(tip: CbxTip, shaftMm: number): any {
  * The contact cone is always aimed/length-solved from the knot to the FIXED model
  * contact via the host's recomputeLeafContactConeAxisAndLength, so the model-side
  * clearance is preserved and the cone won't "snap" on first edit.
+ *
+ * `forceLeaf` overrides the length test. A stick's hub carries an authored FAN of
+ * long tips (CriosphinxHead: six, 7-8mm each) and the host builds exactly that
+ * shape by hand -- its "Leaf Fanning" mode sprouts long leaves straight from a
+ * shaft. Splitting them into branches there invents shafts Chitubox never
+ * authored and detaches the fan from the hub, so hub tips stay leaves whatever
+ * their length. The length test still governs trunk/branch tips, where a long
+ * unsupported cone really would read as a twist.
  */
 export const LEAF_MAX_SHAFT_MM = 0.2;
 export function buildTipFromKnot(
@@ -90,6 +98,7 @@ export function buildTipFromKnot(
   modelId: string,
   tipDefaults: typeof CBX_TIP_DEFAULTS,
   mesh?: THREE.Mesh,
+  forceLeaf = false,
 ): { leaf?: Leaf; branch?: Branch } {
   const knotToContact = Math.hypot(
     contactWorld.x - knotPos.x,
@@ -98,7 +107,7 @@ export function buildTipFromKnot(
   );
   const nativeTipLen = tipDefaults.lengthMm;
   const shaftLength = knotToContact - nativeTipLen;
-  const asBranch = shaftLength > LEAF_MAX_SHAFT_MM;
+  const asBranch = !forceLeaf && shaftLength > LEAF_MAX_SHAFT_MM;
 
   // For a branch, the cone is the SHORT native tip (it sits at the model end of a
   // shaft). For a leaf, the cone spans the whole authored distance from the knot.
