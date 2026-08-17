@@ -127,6 +127,8 @@ interface BuiltSupport {
   knots: Knot[];
   branches: Branch[];
   leaves: Leaf[];
+  /** Ids of leaves built as an authored fan; exempt from the leaf sanity pass. */
+  fanLeafIds: string[];
 }
 
 /**
@@ -148,6 +150,9 @@ interface BuiltSupport {
  * pair that actually bracket the pillar. Any further upward tips are extra
  * contacts on the hub and are returned as leaves/branches so nothing is lost.
  */
+const JOINT_TAPER = 1.1; // twig joint = 1.1x its disk contact diameter
+const JOINT_CLEARANCE_MM = 0.05;
+
 function buildStick(
   s: CbxSupport,
   modelId: string,
@@ -161,45 +166,79 @@ function buildStick(
   const z = (worldZ: number) => worldZ - raftZ;
   const shaftDiameter = s.pillarDiameter;
 
-  // Lowest upward tip pairs with the downward one; the rest hang off the hub.
-  const sorted = [...s.tips].sort((a, b) => a.contactZ - b.contactZ);
-  const [upTip, ...extraTips] = sorted;
+  // Built to the SAME contract as the LYS importer's stick path
+  // (convertLysData Phase 4B), which is the working reference for this shape:
+  //
+  //   coneA = createContactAssembly(s, contactA, /* hint */ contactB, ...)
+  //   coneB = createContactAssembly(s, contactB, /* hint */ contactA, ...)
+  //   segment = { bottomJoint: socketJointA, topJoint: socketJointB }
+  //
+  // Two things I had wrong before:
+  //
+  //  1. ORIENTATION. The host puts cone A at the BOTTOM -- stickBuilder writes
+  //     `bottomJoint: socketJointA, topJoint: socketJointB`, and StickRenderer
+  //     falls back to contactConeA for the segment START and contactConeB for
+  //     the END. I had the authored model contact as cone B at the bottom and a
+  //     synthetic cap as cone A at the top, i.e. the stick inverted.
+  //
+  //  2. THE THIRD ARGUMENT. It is the OPPOSITE CONTACT, used as a direction
+  //     hint -- not a socket/hub position to anchor to. Passing hub joints made
+  //     each cone solve against a point that was not the other end of the stick.
+  //
+  // The shaft is defined by the two CONTACTS; the sockets (and therefore the
+  // joints) fall out of that solve. Since this support authors only one model
+  // contact, the top end is the hub the fan hangs from: a zero-length cone whose
+  // socket lands exactly on it, so it satisfies the two-cone type without
+  // drawing a second contact disk.
+  const CAP_LEN_MM = 1e-4;
+  const extraTips = s.tips;
 
-  const contactA = new THREE.Vector3(upTip.x, upTip.y, z(upTip.contactZ));
-  const contactB = new THREE.Vector3(down.x, down.y, z(down.contactZ));
   const hubTop: Vec3 = { x: s.pillarX, y: s.pillarY, z: z(s.pillarTopZ) };
   const hubBottom: Vec3 = { x: s.pillarX, y: s.pillarY, z: z(s.pillarBottomZ) };
 
-  const assemblyA = createContactAssembly(
-    synthSupportForTip(upTip, hubTop), contactA, hubTop,
-    synthTipSettings(upTip, shaftDiameter), tipDefaults, mesh,
-    false, false, null, true,
-  );
-  // The downward cone needs its AUTHORED axis. Left to infer one,
-  // createContactAssembly solves the socket from the tip length and puts it
-  // BELOW the contact -- correct for a cone reaching up to the model, inverted
-  // here -- so the cone pointed the wrong way, the disk floated clear of the
-  // surface, and the body was stretched and slanted to reach it.
-  //
-  // The record gives both endpoints exactly: the socket sits on the pillar
-  // bottom (0.0000 away in XY and Z) and the contact is 26.8 degrees off
-  // vertical from there. Pass that direction as the authored normal, with
-  // preferAuthoredNormal on, so the body stays vertical and only the short cone
-  // tilts -- matching how Chitubox draws it.
+  // A = the authored model contact, at the BOTTOM.
+  const contactA = new THREE.Vector3(down.x, down.y, z(down.contactZ));
+  // B = the shaft's top terminus (the fan hub). Not a model contact.
+  const contactB = new THREE.Vector3(hubTop.x, hubTop.y, hubTop.z);
+
+  // The record gives the downward cone's axis exactly: socket on the pillar
+  // bottom, contact 26.8 degrees off vertical from there. Feed that as the
+  // authored normal so only the short cone tilts and the body stays vertical.
   const downAxis = new THREE.Vector3(
     down.socketX - down.x,
     down.socketY - down.y,
     z(down.attachZ) - z(down.contactZ),
   ).normalize();
-  const assemblyB = createContactAssembly(
+
+  const assemblyA = createContactAssembly(
     { ...synthSupportForTip(down, hubBottom), tipNormal: { x: downAxis.x, y: downAxis.y, z: downAxis.z } },
-    contactB, hubBottom,
+    contactA,
+    { x: contactB.x, y: contactB.y, z: contactB.z },
     synthTipSettings(down, shaftDiameter), tipDefaults, mesh,
-    true, false, null, false,
+    true, true, downAxis, false,
   );
 
-  const jointA: Joint = { id: uuidv4(), pos: hubTop, diameter: getJointDiameter(shaftDiameter) };
-  const jointB: Joint = { id: uuidv4(), pos: hubBottom, diameter: getJointDiameter(shaftDiameter) };
+  // Cone B caps the top. Aimed DOWN the shaft (toward cone A) so its socket
+  // lands on hubTop rather than beyond it, and given ~zero length so it has no
+  // visible cone body -- there is no second model contact to draw.
+  const capAxis = new THREE.Vector3(0, 0, -1);
+  const assemblyB = createContactAssembly(
+    { ...synthSupportForTip(s.tips[0], hubTop), tipNormal: { x: capAxis.x, y: capAxis.y, z: capAxis.z } },
+    contactB,
+    { x: contactA.x, y: contactA.y, z: contactA.z },
+    { length: CAP_LEN_MM, diameter: shaftDiameter, pointDiameter: shaftDiameter },
+    tipDefaults, mesh,
+    true, true, capAxis, false,
+  );
+
+  const jointA: Joint = assemblyA.socketJoint;
+  const jointB: Joint = assemblyB.socketJoint;
+
+  // Pin the cap length: createContactAssembly re-solves lengthMm from the span
+  // and would otherwise restore the default, reinstating the stray second cone.
+  if (assemblyB.contactCone.profile) {
+    assemblyB.contactCone.profile.lengthMm = CAP_LEN_MM;
+  }
 
   const stick: Stick = {
     id: uuidv4(),
@@ -209,16 +248,19 @@ function buildStick(
         id: uuidv4(),
         type: 'straight',
         diameter: shaftDiameter,
-        bottomJoint: jointB,
-        topJoint: jointA,
+        // A is the bottom cone, B the top -- same order as the host's
+        // stickBuilder and the LYS importer.
+        bottomJoint: jointA,
+        topJoint: jointB,
       },
     ],
     contactConeA: assemblyA.contactCone,
     contactConeB: assemblyB.contactCone,
   };
 
-  // Remaining upward contacts become leaves/branches on a hub knot, exactly as
-  // extra tips do on a trunk.
+  // ALL upward contacts become leaves on the hub knot (forceLeaf below), so the
+  // branches array stays empty here for a stick -- it is kept only because
+  // buildTipFromKnot's return type is shared with the trunk path.
   const knots: Knot[] = [];
   const branches: Branch[] = [];
   const leaves: Leaf[] = [];
@@ -237,36 +279,58 @@ function buildStick(
   // endpoints so the type's optionality does not need an assertion.
   const segStart = stickSegment.bottomJoint?.pos ?? hubBottom;
   const segEnd = stickSegment.topJoint?.pos ?? hubTop;
-  const segVec = new THREE.Vector3(
-    segEnd.x - segStart.x,
-    segEnd.y - segStart.y,
-    segEnd.z - segStart.z,
-  );
-  const segLenSq = segVec.lengthSq();
 
-  /** Normalised 0-1 position of the closest point on the stick body to `p`. */
-  const tAlongSegment = (p: Vec3): number => {
-    if (segLenSq <= 1e-9) return 0;
-    const rel = new THREE.Vector3(p.x - segStart.x, p.y - segStart.y, p.z - segStart.z);
-    return Math.min(1, Math.max(0, rel.dot(segVec) / segLenSq));
-  };
-
+  // Build the hub knot EXACTLY as the native "sprout leaf" flow does when the
+  // user clicks near a joint (LeafPlacementController, stage awaitingSproutTip):
+  //
+  //     { parentShaftId: seg.id, t: 1.0, pos: joint.pos, diameter: joint.diameter }
+  //
+  // Three details matter, and I had all three slightly off:
+  //   - pos is the JOINT'S OWN position, not a point re-projected onto the
+  //     segment line. The joint is already on the line; re-deriving it introduced
+  //     a sub-millimetre disagreement between pos and t.
+  //   - diameter comes from the JOINT, not from a recomputed shaft diameter, so
+  //     the knot matches the shaft it sits on.
+  //   - no _importHint. The native flow stamps none, and normalization then
+  //     treats the knot as already-consistent instead of relocating it.
+  const hubJoint = stickSegment.topJoint;
+  const hubAttachT = 1.0;
+  // COPY the joint's position -- never alias it. The cluster transforms
+  // (applyZShift/applyXYShift) dedupe JOINTS by id but iterate knots
+  // unconditionally, so a knot sharing the joint's Vec3 object gets shifted once
+  // as the joint and again for every knot pointing at it. With six hub knots the
+  // shaft top was translated 7x while the bottom moved once -- the body sheared
+  // away from its own fan. Each knot needs its own Vec3.
+  const hubAttachSrc: Vec3 = hubJoint?.pos ?? segEnd;
+  const hubAttach: Vec3 = { x: hubAttachSrc.x, y: hubAttachSrc.y, z: hubAttachSrc.z };
   for (const tip of extraTips) {
-    const attachT = tAlongSegment(hubTop);
+    const attachT = hubAttachT;
     const leafKnot: Knot = {
       id: uuidv4(),
       parentShaftId: stickSegment.id,
       t: attachT,
-      pos: hubTop,
-      diameter: getJointDiameter(shaftDiameter),
-      _importHint: 'preserve',
+      // Fresh Vec3 per knot: see hubAttach above.
+      pos: { x: hubAttach.x, y: hubAttach.y, z: hubAttach.z },
+      diameter: hubJoint?.diameter ?? getJointDiameter(shaftDiameter),
+      // Stamp 'project' so normalization takes the import-hint fast path
+      // (state.ts) instead of falling through to the heuristic preserve rules
+      // below it. Those heuristics -- preserveAuthoredTerminalLeafHostPos and
+      // friends -- are written for trunk/branch knots and key off
+      // isEndpointProjection, which is TRUE for every hub knot here because they
+      // all sit at t=1.0. Without a hint they decide a stick hub knot's fate by
+      // rules that were never meant for it. The native sprout flow omits the
+      // hint safely because it runs at interaction time, never through
+      // normalizeLoadedKnotAndLeafGeometry; an IMPORTED knot must be explicit.
+      _importHint: 'project',
     };
     knots.push(leafKnot);
 
+    // forceLeaf: a stick's hub fan is authored as leaves, however long. See
+    // buildTipFromKnot's note -- the length test is for trunk tips, not fans.
     const { leaf, branch } = buildTipFromKnot(
-      tip, leafKnot, hubTop,
+      tip, leafKnot, hubAttach,
       new THREE.Vector3(tip.x, tip.y, z(tip.contactZ)),
-      shaftDiameter, modelId, tipDefaults, mesh,
+      shaftDiameter, modelId, tipDefaults, mesh, true,
     );
     if (leaf) leaves.push(leaf);
     if (branch) branches.push(branch);
@@ -368,7 +432,7 @@ function buildSupport(
       segments: [soloSegment],
       contactCone: undefined,
     };
-    return { root, trunk, knots: [], branches: [], leaves: [] };
+    return { root, trunk, knots: [], branches: [], leaves: [], fanLeafIds: [] };
   }
 
   const [primaryTip, ...extraTips] = s.tips;
@@ -441,6 +505,7 @@ function buildSupport(
   // tipLen. If ≤ 0.2mm there's no room for a shaft → Leaf (cone straight from the
   // knot). Otherwise → Branch (single segment knot → socket + short native cone).
   // All extra tips share one knot on the shaft (Chitu roots them at the pillar top).
+  const fanLeafIds = new Set<string>();
   if (extraTips.length > 0) {
     const topSegment = segments[segments.length - 1];
     // Place the shared knot at the AUTHORED knot height (knotCenter) — the LYS
@@ -462,6 +527,12 @@ function buildSupport(
     };
     knots.push(sharedKnot);
 
+    // forceLeaf: these extra tips are an authored FAN. Chitubox roots them all at
+    // one shared height and draws each as a single long cone to the model (see the
+    // reference screenshots). Under the length test they are 4-8mm from the knot,
+    // so every one became a Branch -- its own thin shaft plus a short cone -- which
+    // renders as splayed struts radiating outward instead of a clean fan, and
+    // invents shafts the file never authored. Same treatment as a stick's hub fan.
     for (const tip of extraTips) {
       const { leaf, branch } = buildTipFromKnot(
         tip,
@@ -472,8 +543,9 @@ function buildSupport(
         modelId,
         tipDefaults,
         mesh,
+        true,
       );
-      if (leaf) leaves.push(leaf);
+      if (leaf) { leaves.push(leaf); fanLeafIds.add(leaf.id); }
       if (branch) branches.push(branch);
     }
   }
@@ -487,7 +559,7 @@ function buildSupport(
   // recompute the mousewheel triggers), so the imported trunk renders correctly.
   applyTrunkDiameterProfile(trunk, rootTopZ, knots, branches);
 
-  return { root, trunk, knots, branches, leaves };
+  return { root, trunk, knots, branches, leaves, fanLeafIds: [...fanLeafIds] };
 }
 
 /** Resolve tip defaults from live settings if provided, else module fallback. */
@@ -560,6 +632,10 @@ export class CbxConverter {
     const branches: Branch[] = [];
     const sticks: Stick[] = [];
     const leaves: Leaf[] = [];
+    // Leaves built on an authored FAN hub -- a stick's top knot or a junction
+    // knot. Both are authored at their final position, so the leaf sanity pass
+    // below must not re-classify them as branches by knot-to-contact length.
+    const stickHubLeafIds = new Set<string>();
     const braces: Brace[] = [];
 
     // Supports are emitted in the SAME world frame as the model geometry (raw +
@@ -636,9 +712,9 @@ export class CbxConverter {
       try {
         // A support with a downward contact spans between two parts of the
         // model rather than standing on the plate: DragonFruit models that as a
-        // Stick, whose two contact cones are the downward tip and the lowest
-        // upward tip, with the pillar as its body. Any remaining upward tips
-        // become leaves/branches on the hub via the normal path below.
+        // Stick, whose two contact cones are the downward tip and the upward tip
+        // best continuing the shaft's line, with the pillar as its body. Any
+        // remaining upward tips fan off the hub knot as leaves.
         if (s.downwardTip && s.tips.length > 0) {
           const stick = buildStick(s, placeholderModelId, raftZ, tipDefaults, mesh);
           if (stick) {
@@ -646,6 +722,7 @@ export class CbxConverter {
             knots.push(...stick.knots);
             branches.push(...stick.branches);
             leaves.push(...stick.leaves);
+            for (const l of stick.leaves) stickHubLeafIds.add(l.id);
             continue;
           }
         }
@@ -658,6 +735,7 @@ export class CbxConverter {
         knots.push(...built.knots);
         branches.push(...built.branches);
         leaves.push(...built.leaves);
+        for (const id of built.fanLeafIds) stickHubLeafIds.add(id);
 
         if (s.isForkJunction) {
           forkJunctionTrunks.push({
@@ -1070,8 +1148,9 @@ export class CbxConverter {
       };
       knots.push(junctionKnot);
 
-      // Every junction tip radiates from the junction knot as a Leaf (short) or a
-      // Branch (long: thin shaft + short native cone), same as multi-tip trunk tips.
+      // Junction tips radiate from the junction knot as an authored FAN, same as
+      // a multi-tip trunk's extra tips and a stick's hub -- forceLeaf, so the
+      // knot-to-contact length test does not split them into separate shafts.
       for (const tip of jb.tips) {
         const { leaf, branch } = buildTipFromKnot(
           tip,
@@ -1082,8 +1161,9 @@ export class CbxConverter {
           placeholderModelId,
           tipDefaults,
           mesh,
+          true,
         );
-        if (leaf) leaves.push(leaf);
+        if (leaf) { leaves.push(leaf); stickHubLeafIds.add(leaf.id); }
         if (branch) branches.push(branch);
         junctionTipsBuilt++;
       }
@@ -1110,8 +1190,7 @@ export class CbxConverter {
     // face the model (not along the strut) and the twig renders like a native one.
     const modelTwigs = model.twigs ?? [];
     const twigs: Twig[] = [];
-    const JOINT_TAPER = 1.1; // twig joint = 1.1x its disk contact diameter
-    const JOINT_CLEARANCE_MM = 0.05;
+
     // Recover the model surface normal at a contact point. The contact sits ON the
     // model; we want the normal of the face it actually rests on, oriented OUT of the
     // solid (the direction the twig disk stands off). The earlier approach cast a
@@ -1301,6 +1380,9 @@ export class CbxConverter {
     // Here we re-check every leaf against its FINAL knot position and convert any
     // over-long one into a Branch (shaft knot→socket + short native cone), which
     // approaches the contact along the surface instead of cutting through.
+    //
+    // Stick-hub leaves are EXEMPT: their knot is authored at the hub and never
+    // relocated, so a long knot→contact distance is the intended fan, not drift.
     {
       const knotById = new Map(knots.map((k) => [k.id, k]));
       const tipLen = CBX_TIP_DEFAULTS.lengthMm;
@@ -1310,6 +1392,7 @@ export class CbxConverter {
         const knot = leaf.parentKnotId ? knotById.get(leaf.parentKnotId) : undefined;
         const cc = leaf.contactCone;
         if (!knot || !cc) { keptLeaves.push(leaf); continue; }
+        if (stickHubLeafIds.has(leaf.id)) { keptLeaves.push(leaf); continue; }
         const knotToContact = Math.hypot(cc.pos.x - knot.pos.x, cc.pos.y - knot.pos.y, cc.pos.z - knot.pos.z);
         if (knotToContact <= tipLen + LEAF_MAX_SHAFT_MM) { keptLeaves.push(leaf); continue; }
 
