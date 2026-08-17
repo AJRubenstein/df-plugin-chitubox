@@ -333,6 +333,19 @@ function parseSupportBlock(
 
   // Assign each tip to the chain whose knot center matches its botZ; tiebreak by
   // XY distance from the pillar (handles branched tips + stacked supports).
+  //
+  // The Z gate alone is NOT sufficient. On a large model many pillars share a knot
+  // height, so a tip could bind to a chain anywhere on the plate purely because the
+  // Z lined up -- Supported_Chest_Back had 5 tips matched to chains 52-59mm away in
+  // XY, which then rendered as giant leaves spanning the whole model.
+  //
+  // A tip's SOCKET sits on its own pillar: measured across that file the socket is
+  // 0.00mm from the nearest pillar at the median and 2.45mm at worst. Cap the match
+  // well above that (8mm) so genuine branched/offset tips still bind while a
+  // cross-model match cannot. Score on the SOCKET, not the contact: the contact end
+  // legitimately reaches out to the model, the socket is the end that must sit on
+  // the shaft.
+  const TIP_CHAIN_MAX_XY_MM = 8;
   const unassignedTips: RawRecord[] = [];
   for (const t of tips) {
     let best: Chain | null = null;
@@ -340,8 +353,10 @@ function parseSupportBlock(
     for (const c of chains) {
       const dz = Math.abs(c.knotCenter - t.botZ);
       if (dz > 0.1) continue;
-      const dxy = Math.hypot(t.x - c.pillar.x, t.y - c.pillar.y);
-      const score = dz * 10 + dxy; // Z continuity dominant, XY tiebreak
+      // Socket-to-pillar distance is the real attachment test.
+      const dxySocket = Math.hypot(t.x2 - c.pillar.x, t.y2 - c.pillar.y);
+      if (dxySocket > TIP_CHAIN_MAX_XY_MM) continue;
+      const score = dz * 10 + dxySocket; // Z continuity dominant, XY tiebreak
       if (score < bestScore) {
         bestScore = score;
         best = c;
@@ -651,6 +666,8 @@ function parseSupportBlock(
       // socket sits on the bottom knot; the chain builder only matches tips to
       // the TOP knot, so it is picked up here.
       downwardTip: (() => {
+        // Exactly one downward tip per stick-shaped support across every test
+        // file (verified by trace); find() is sufficient.
         const down = recs.find((r) =>
           (r.sub === TIP_SUB)
           && Math.abs(r.botZ - c.pillar.botZ) <= 0.15
