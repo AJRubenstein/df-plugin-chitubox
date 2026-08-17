@@ -65,6 +65,15 @@ export function applyZShift(data: DragonfruitImportFormat, deltaZ: number): void
     if (twig.contactDiskA?.pos) twig.contactDiskA.pos.z += deltaZ;
     if (twig.contactDiskB?.pos) twig.contactDiskB.pos.z += deltaZ;
   }
+  // Sticks were MISSING from this walk. Their segments/cones stayed in the
+  // authored frame while their leaves and hub knots were shifted with everyone
+  // else, so the body separated from its own fan by exactly deltaZ -- the
+  // "renders as two separate supports" bug.
+  for (const stick of data.sticks ?? []) {
+    shiftSegments(stick.segments);
+    shiftCone(stick.contactConeA);
+    shiftCone(stick.contactConeB);
+  }
   for (const leaf of data.leaves ?? []) {
     shiftCone(leaf.contactCone);
   }
@@ -136,6 +145,12 @@ export function applyXYShift(data: DragonfruitImportFormat, deltaX: number, delt
     shiftSegments(twig.segments);
     shiftCone(twig.contactDiskA);
     shiftCone(twig.contactDiskB);
+  }
+  // Sticks were missing here too -- same defect as applyZShift above.
+  for (const stick of data.sticks ?? []) {
+    shiftSegments(stick.segments);
+    shiftCone(stick.contactConeA);
+    shiftCone(stick.contactConeB);
   }
   for (const leaf of data.leaves ?? []) {
     // Leaves carry only a contact cone (no segments); its pos MUST shift with the
