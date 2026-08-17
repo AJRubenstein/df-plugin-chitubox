@@ -270,7 +270,14 @@ function parseSupportBlock(
     return onPillarShaft(pi1, r.topZ) && onPillarShaft(pi2, r.botZ);
   };
 
-  const allTipRecs = recs.filter((r) => r.sub === TIP_SUB);
+  // A DOWNWARD cone (contact below its socket) anchors a support that stands on
+  // the model rather than the plate. Its socket sits on a knot, so the chain
+  // builder below would otherwise claim it as an ordinary upward tip and bend
+  // the support toward it. Hold it back here; it is picked up separately as the
+  // support's downwardTip and drives the Stick path.
+  const isDownwardCone = (r: RawRecord) => r.topZ < r.botZ;
+
+  const allTipRecs = recs.filter((r) => r.sub === TIP_SUB && !isDownwardCone(r));
   const tips = allTipRecs.filter((r) => !tipIsPillarLink(r));
   const tipBraceRecs = allTipRecs.filter(tipIsPillarLink);
 
