@@ -223,25 +223,53 @@ function buildStick(
   const branches: Branch[] = [];
   const leaves: Leaf[] = [];
 
-  if (extraTips.length > 0) {
-    const hubKnot: Knot = {
+  // ONE KNOT PER LEAF, matching how the host places them by hand: a new knot is
+  // generated at the attach point as each leaf tip is placed. The LYS importer
+  // does the same (convertLysData: a fresh Knot per leaf, never a shared hub).
+  // A single shared knot renders only one leaf attached and leaves the rest
+  // visually detached.
+  //
+  // `t` is the normalised position along the host segment. The host's
+  // normalization derives a knot's position from parentShaftId + t, so omitting
+  // it leaves the knot unanchored on the shaft.
+  const stickSegment = stick.segments[0];
+  // Both joints are set when the stick is built above; fall back to the hub
+  // endpoints so the type's optionality does not need an assertion.
+  const segStart = stickSegment.bottomJoint?.pos ?? hubBottom;
+  const segEnd = stickSegment.topJoint?.pos ?? hubTop;
+  const segVec = new THREE.Vector3(
+    segEnd.x - segStart.x,
+    segEnd.y - segStart.y,
+    segEnd.z - segStart.z,
+  );
+  const segLenSq = segVec.lengthSq();
+
+  /** Normalised 0-1 position of the closest point on the stick body to `p`. */
+  const tAlongSegment = (p: Vec3): number => {
+    if (segLenSq <= 1e-9) return 0;
+    const rel = new THREE.Vector3(p.x - segStart.x, p.y - segStart.y, p.z - segStart.z);
+    return Math.min(1, Math.max(0, rel.dot(segVec) / segLenSq));
+  };
+
+  for (const tip of extraTips) {
+    const attachT = tAlongSegment(hubTop);
+    const leafKnot: Knot = {
       id: uuidv4(),
-      parentShaftId: stick.segments[0].id,
+      parentShaftId: stickSegment.id,
+      t: attachT,
       pos: hubTop,
       diameter: getJointDiameter(shaftDiameter),
       _importHint: 'preserve',
     };
-    knots.push(hubKnot);
+    knots.push(leafKnot);
 
-    for (const tip of extraTips) {
-      const { leaf, branch } = buildTipFromKnot(
-        tip, hubKnot, hubTop,
-        new THREE.Vector3(tip.x, tip.y, z(tip.contactZ)),
-        shaftDiameter, modelId, tipDefaults, mesh,
-      );
-      if (leaf) leaves.push(leaf);
-      if (branch) branches.push(branch);
-    }
+    const { leaf, branch } = buildTipFromKnot(
+      tip, leafKnot, hubTop,
+      new THREE.Vector3(tip.x, tip.y, z(tip.contactZ)),
+      shaftDiameter, modelId, tipDefaults, mesh,
+    );
+    if (leaf) leaves.push(leaf);
+    if (branch) branches.push(branch);
   }
 
   return { stick, knots, branches, leaves };
