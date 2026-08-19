@@ -164,6 +164,17 @@ export interface CbxSupport {
    * braces create) instead of a grounded trunk with a floating root "cup".
    */
   isForkJunction?: boolean;
+  /**
+   * Contact that hangs DOWN from this support's base onto the model, present
+   * when the support spans between two parts of the model rather than standing
+   * on the plate. Its socket meets the pillar bottom; its contact is below.
+   *
+   * With one of these the support is a DragonFruit Stick: a model-to-model
+   * element whose two contact cones are this one and the lowest upward tip,
+   * with the pillar as its body. Any remaining upward tips become leaves or
+   * branches on the hub.
+   */
+  downwardTip?: CbxTip;
 }
 
 /**

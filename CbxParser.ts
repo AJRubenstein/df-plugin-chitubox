@@ -192,7 +192,26 @@ function parseSupportBlock(
     const base = recBase + i * REC_SIZE;
     if (u32(view, base) !== TAG_EA) continue;
     const rec = readRecord(view, base);
-    if (rec.sub === MODEL_HDR_SUB || rec.sub === SUMMARY_SUB) continue;
+    if (rec.sub === SUMMARY_SUB) continue;
+    if (rec.sub === MODEL_HDR_SUB) {
+      // Sub-2 is usually a model header with no geometry, but it also carries
+      // the DOWNWARD contact cone that anchors a support standing on the model:
+      // same field layout and radius pair as a sub-1 tip, just inverted, with
+      // the narrow contact end below the wide socket. Without it a mid-air
+      // branch hangs attached to nothing.
+      //
+      // Only a record whose endpoints actually describe a cone qualifies; a
+      // real header has no such span.
+      const spans = Math.abs(rec.topZ - rec.botZ) > 0.05 && rec.paramA > 0 && rec.paramB > 0;
+      if (!spans) continue;
+      // No re-orientation is needed: the fields already follow the tip
+      // convention. (x, y, topZ) is the narrow contact end -- here below the
+      // socket, because this cone points DOWN onto the model -- and
+      // (x2, y2, botZ) is the wide socket, which lands exactly on the knot the
+      // branch hangs from. The chain builder matches a tip by its botZ, so it
+      // attaches correctly as-is.
+      rec.sub = TIP_SUB;
+    }
     // Shift Z into world frame up front so all continuity math is in one frame.
     rec.topZ += zOff;
     rec.botZ += zOff;
@@ -251,7 +270,14 @@ function parseSupportBlock(
     return onPillarShaft(pi1, r.topZ) && onPillarShaft(pi2, r.botZ);
   };
 
-  const allTipRecs = recs.filter((r) => r.sub === TIP_SUB);
+  // A DOWNWARD cone (contact below its socket) anchors a support that stands on
+  // the model rather than the plate. Its socket sits on a knot, so the chain
+  // builder below would otherwise claim it as an ordinary upward tip and bend
+  // the support toward it. Hold it back here; it is picked up separately as the
+  // support's downwardTip and drives the Stick path.
+  const isDownwardCone = (r: RawRecord) => r.topZ < r.botZ;
+
+  const allTipRecs = recs.filter((r) => r.sub === TIP_SUB && !isDownwardCone(r));
   const tips = allTipRecs.filter((r) => !tipIsPillarLink(r));
   const tipBraceRecs = allTipRecs.filter(tipIsPillarLink);
 
@@ -307,6 +333,19 @@ function parseSupportBlock(
 
   // Assign each tip to the chain whose knot center matches its botZ; tiebreak by
   // XY distance from the pillar (handles branched tips + stacked supports).
+  //
+  // The Z gate alone is NOT sufficient. On a large model many pillars share a knot
+  // height, so a tip could bind to a chain anywhere on the plate purely because the
+  // Z lined up -- Supported_Chest_Back had 5 tips matched to chains 52-59mm away in
+  // XY, which then rendered as giant leaves spanning the whole model.
+  //
+  // A tip's SOCKET sits on its own pillar: measured across that file the socket is
+  // 0.00mm from the nearest pillar at the median and 2.45mm at worst. Cap the match
+  // well above that (8mm) so genuine branched/offset tips still bind while a
+  // cross-model match cannot. Score on the SOCKET, not the contact: the contact end
+  // legitimately reaches out to the model, the socket is the end that must sit on
+  // the shaft.
+  const TIP_CHAIN_MAX_XY_MM = 8;
   const unassignedTips: RawRecord[] = [];
   for (const t of tips) {
     let best: Chain | null = null;
@@ -314,8 +353,10 @@ function parseSupportBlock(
     for (const c of chains) {
       const dz = Math.abs(c.knotCenter - t.botZ);
       if (dz > 0.1) continue;
-      const dxy = Math.hypot(t.x - c.pillar.x, t.y - c.pillar.y);
-      const score = dz * 10 + dxy; // Z continuity dominant, XY tiebreak
+      // Socket-to-pillar distance is the real attachment test.
+      const dxySocket = Math.hypot(t.x2 - c.pillar.x, t.y2 - c.pillar.y);
+      if (dxySocket > TIP_CHAIN_MAX_XY_MM) continue;
+      const score = dz * 10 + dxySocket; // Z continuity dominant, XY tiebreak
       if (score < bestScore) {
         bestScore = score;
         best = c;
@@ -512,7 +553,12 @@ function parseSupportBlock(
     if (baseZ - plateZ <= MID_AIR_MM) return false; // grounded, not mid-air
     if (c.base) return false; // has its own base pad → genuinely grounded support
     if (footBottomFor(c.pillar.x, c.pillar.y) !== null) return false; // sits on a foot
-    return convergingBraceCount(c.pillar.x, c.pillar.y, c.pillar.botZ) >= 2;
+    // Airborne with no pad and no foot: a branch, not a trunk. Converging braces
+    // are the usual reason (a fork junction), but a pillar can also stand
+    // directly on the model surface with nothing feeding it -- CriosphinxHead
+    // has one starting 21mm up. Either way a grounded trunk would plant a root
+    // cup in mid-air, which the support model never allows.
+    return true;
   };
 
   // Materialize into CbxSupport records.
@@ -615,6 +661,35 @@ function parseSupportBlock(
         };
       }),
       isForkJunction: fork,
+      // A contact hanging DOWN from the pillar bottom means this support spans
+      // between two parts of the model rather than standing on the plate. Its
+      // socket sits on the bottom knot; the chain builder only matches tips to
+      // the TOP knot, so it is picked up here.
+      downwardTip: (() => {
+        // Exactly one downward tip per stick-shaped support across every test
+        // file (verified by trace); find() is sufficient.
+        const down = recs.find((r) =>
+          (r.sub === TIP_SUB)
+          && Math.abs(r.botZ - c.pillar.botZ) <= 0.15
+          && Math.hypot(r.x2 - c.pillar.x, r.y2 - c.pillar.y) <= 0.5
+          && r.topZ < r.botZ);
+        if (!down) return undefined;
+        const dx = down.x - down.x2;
+        const dy = down.y - down.y2;
+        const dz = down.topZ - down.botZ;
+        return {
+          x: down.x,
+          y: down.y,
+          contactZ: down.topZ,
+          attachZ: down.botZ,
+          socketX: down.x2,
+          socketY: down.y2,
+          length: Math.sqrt(dx * dx + dy * dy + dz * dz),
+          contactDiameter: down.paramA * 2,
+          bodyDiameter: down.paramB * 2,
+          contactDepth: down.extra,
+        };
+      })(),
     };
 
     supports.push(support);

@@ -11,6 +11,7 @@ import {
   Segment,
   Vec3,
   Twig,
+  Stick,
   ContactDisk,
 } from '@/supports/types';
 import { SupportSettings } from '@/supports/Settings';
@@ -126,6 +127,8 @@ interface BuiltSupport {
   knots: Knot[];
   branches: Branch[];
   leaves: Leaf[];
+  /** Ids of leaves built as an authored fan; exempt from the leaf sanity pass. */
+  fanLeafIds: string[];
 }
 
 /**
@@ -139,6 +142,203 @@ interface BuiltSupport {
  *   primary tip       → trunk terminal cone (authored length)
  *   extra tips        → Knot on the shaft + Branch with its own cone
  */
+/**
+ * Build a Stick: a model-to-model support whose body spans between two contact
+ * points on the model, rather than rising from the plate.
+ *
+ * The two cones are the authored downward tip and the LOWEST upward tip -- the
+ * pair that actually bracket the pillar. Any further upward tips are extra
+ * contacts on the hub and are returned as leaves/branches so nothing is lost.
+ */
+const JOINT_TAPER = 1.1; // twig joint = 1.1x its disk contact diameter
+const JOINT_CLEARANCE_MM = 0.05;
+
+function buildStick(
+  s: CbxSupport,
+  modelId: string,
+  raftZ: number,
+  tipDefaults: typeof CBX_TIP_DEFAULTS,
+  mesh?: THREE.Mesh,
+): { stick: Stick; knots: Knot[]; branches: Branch[]; leaves: Leaf[] } | null {
+  const down = s.downwardTip;
+  if (!down || s.tips.length === 0) return null;
+
+  const z = (worldZ: number) => worldZ - raftZ;
+  const shaftDiameter = s.pillarDiameter;
+
+  // Built to the SAME contract as the LYS importer's stick path
+  // (convertLysData Phase 4B), which is the working reference for this shape:
+  //
+  //   coneA = createContactAssembly(s, contactA, /* hint */ contactB, ...)
+  //   coneB = createContactAssembly(s, contactB, /* hint */ contactA, ...)
+  //   segment = { bottomJoint: socketJointA, topJoint: socketJointB }
+  //
+  // Two things I had wrong before:
+  //
+  //  1. ORIENTATION. The host puts cone A at the BOTTOM -- stickBuilder writes
+  //     `bottomJoint: socketJointA, topJoint: socketJointB`, and StickRenderer
+  //     falls back to contactConeA for the segment START and contactConeB for
+  //     the END. I had the authored model contact as cone B at the bottom and a
+  //     synthetic cap as cone A at the top, i.e. the stick inverted.
+  //
+  //  2. THE THIRD ARGUMENT. It is the OPPOSITE CONTACT, used as a direction
+  //     hint -- not a socket/hub position to anchor to. Passing hub joints made
+  //     each cone solve against a point that was not the other end of the stick.
+  //
+  // The shaft is defined by the two CONTACTS; the sockets (and therefore the
+  // joints) fall out of that solve. Since this support authors only one model
+  // contact, the top end is the hub the fan hangs from: a zero-length cone whose
+  // socket lands exactly on it, so it satisfies the two-cone type without
+  // drawing a second contact disk.
+  const CAP_LEN_MM = 1e-4;
+  const extraTips = s.tips;
+
+  const hubTop: Vec3 = { x: s.pillarX, y: s.pillarY, z: z(s.pillarTopZ) };
+  const hubBottom: Vec3 = { x: s.pillarX, y: s.pillarY, z: z(s.pillarBottomZ) };
+
+  // A = the authored model contact, at the BOTTOM.
+  const contactA = new THREE.Vector3(down.x, down.y, z(down.contactZ));
+  // B = the shaft's top terminus (the fan hub). Not a model contact.
+  const contactB = new THREE.Vector3(hubTop.x, hubTop.y, hubTop.z);
+
+  // The record gives the downward cone's axis exactly: socket on the pillar
+  // bottom, contact 26.8 degrees off vertical from there. Feed that as the
+  // authored normal so only the short cone tilts and the body stays vertical.
+  const downAxis = new THREE.Vector3(
+    down.socketX - down.x,
+    down.socketY - down.y,
+    z(down.attachZ) - z(down.contactZ),
+  ).normalize();
+
+  const assemblyA = createContactAssembly(
+    { ...synthSupportForTip(down, hubBottom), tipNormal: { x: downAxis.x, y: downAxis.y, z: downAxis.z } },
+    contactA,
+    { x: contactB.x, y: contactB.y, z: contactB.z },
+    synthTipSettings(down, shaftDiameter), tipDefaults, mesh,
+    true, true, downAxis, false,
+  );
+
+  // Cone B caps the top. Aimed DOWN the shaft (toward cone A) so its socket
+  // lands on hubTop rather than beyond it, and given ~zero length so it has no
+  // visible cone body -- there is no second model contact to draw.
+  const capAxis = new THREE.Vector3(0, 0, -1);
+  const assemblyB = createContactAssembly(
+    { ...synthSupportForTip(s.tips[0], hubTop), tipNormal: { x: capAxis.x, y: capAxis.y, z: capAxis.z } },
+    contactB,
+    { x: contactA.x, y: contactA.y, z: contactA.z },
+    { length: CAP_LEN_MM, diameter: shaftDiameter, pointDiameter: shaftDiameter },
+    tipDefaults, mesh,
+    true, true, capAxis, false,
+  );
+
+  const jointA: Joint = assemblyA.socketJoint;
+  const jointB: Joint = assemblyB.socketJoint;
+
+  // Pin the cap length: createContactAssembly re-solves lengthMm from the span
+  // and would otherwise restore the default, reinstating the stray second cone.
+  if (assemblyB.contactCone.profile) {
+    assemblyB.contactCone.profile.lengthMm = CAP_LEN_MM;
+  }
+
+  const stick: Stick = {
+    id: uuidv4(),
+    modelId,
+    segments: [
+      {
+        id: uuidv4(),
+        type: 'straight',
+        diameter: shaftDiameter,
+        // A is the bottom cone, B the top -- same order as the host's
+        // stickBuilder and the LYS importer.
+        bottomJoint: jointA,
+        topJoint: jointB,
+      },
+    ],
+    contactConeA: assemblyA.contactCone,
+    contactConeB: assemblyB.contactCone,
+  };
+
+  // ALL upward contacts become leaves on the hub knot (forceLeaf below), so the
+  // branches array stays empty here for a stick -- it is kept only because
+  // buildTipFromKnot's return type is shared with the trunk path.
+  const knots: Knot[] = [];
+  const branches: Branch[] = [];
+  const leaves: Leaf[] = [];
+
+  // ONE KNOT PER LEAF, matching how the host places them by hand: a new knot is
+  // generated at the attach point as each leaf tip is placed. The LYS importer
+  // does the same (convertLysData: a fresh Knot per leaf, never a shared hub).
+  // A single shared knot renders only one leaf attached and leaves the rest
+  // visually detached.
+  //
+  // `t` is the normalised position along the host segment. The host's
+  // normalization derives a knot's position from parentShaftId + t, so omitting
+  // it leaves the knot unanchored on the shaft.
+  const stickSegment = stick.segments[0];
+  // Both joints are set when the stick is built above; fall back to the hub
+  // endpoints so the type's optionality does not need an assertion.
+  const segStart = stickSegment.bottomJoint?.pos ?? hubBottom;
+  const segEnd = stickSegment.topJoint?.pos ?? hubTop;
+
+  // Build the hub knot EXACTLY as the native "sprout leaf" flow does when the
+  // user clicks near a joint (LeafPlacementController, stage awaitingSproutTip):
+  //
+  //     { parentShaftId: seg.id, t: 1.0, pos: joint.pos, diameter: joint.diameter }
+  //
+  // Three details matter, and I had all three slightly off:
+  //   - pos is the JOINT'S OWN position, not a point re-projected onto the
+  //     segment line. The joint is already on the line; re-deriving it introduced
+  //     a sub-millimetre disagreement between pos and t.
+  //   - diameter comes from the JOINT, not from a recomputed shaft diameter, so
+  //     the knot matches the shaft it sits on.
+  //   - no _importHint. The native flow stamps none, and normalization then
+  //     treats the knot as already-consistent instead of relocating it.
+  const hubJoint = stickSegment.topJoint;
+  const hubAttachT = 1.0;
+  // COPY the joint's position -- never alias it. The cluster transforms
+  // (applyZShift/applyXYShift) dedupe JOINTS by id but iterate knots
+  // unconditionally, so a knot sharing the joint's Vec3 object gets shifted once
+  // as the joint and again for every knot pointing at it. With six hub knots the
+  // shaft top was translated 7x while the bottom moved once -- the body sheared
+  // away from its own fan. Each knot needs its own Vec3.
+  const hubAttachSrc: Vec3 = hubJoint?.pos ?? segEnd;
+  const hubAttach: Vec3 = { x: hubAttachSrc.x, y: hubAttachSrc.y, z: hubAttachSrc.z };
+  for (const tip of extraTips) {
+    const attachT = hubAttachT;
+    const leafKnot: Knot = {
+      id: uuidv4(),
+      parentShaftId: stickSegment.id,
+      t: attachT,
+      // Fresh Vec3 per knot: see hubAttach above.
+      pos: { x: hubAttach.x, y: hubAttach.y, z: hubAttach.z },
+      diameter: hubJoint?.diameter ?? getJointDiameter(shaftDiameter),
+      // Stamp 'project' so normalization takes the import-hint fast path
+      // (state.ts) instead of falling through to the heuristic preserve rules
+      // below it. Those heuristics -- preserveAuthoredTerminalLeafHostPos and
+      // friends -- are written for trunk/branch knots and key off
+      // isEndpointProjection, which is TRUE for every hub knot here because they
+      // all sit at t=1.0. Without a hint they decide a stick hub knot's fate by
+      // rules that were never meant for it. The native sprout flow omits the
+      // hint safely because it runs at interaction time, never through
+      // normalizeLoadedKnotAndLeafGeometry; an IMPORTED knot must be explicit.
+      _importHint: 'project',
+    };
+    knots.push(leafKnot);
+
+    // forceLeaf: a stick's hub fan is authored as leaves, however long. See
+    // buildTipFromKnot's note -- the length test is for trunk tips, not fans.
+    const { leaf, branch } = buildTipFromKnot(
+      tip, leafKnot, hubAttach,
+      new THREE.Vector3(tip.x, tip.y, z(tip.contactZ)),
+      shaftDiameter, modelId, tipDefaults, mesh, true,
+    );
+    if (leaf) leaves.push(leaf);
+    if (branch) branches.push(branch);
+  }
+
+  return { stick, knots, branches, leaves };
+}
+
 function buildSupport(
   s: CbxSupport,
   modelId: string,
@@ -232,7 +432,7 @@ function buildSupport(
       segments: [soloSegment],
       contactCone: undefined,
     };
-    return { root, trunk, knots: [], branches: [], leaves: [] };
+    return { root, trunk, knots: [], branches: [], leaves: [], fanLeafIds: [] };
   }
 
   const [primaryTip, ...extraTips] = s.tips;
@@ -305,6 +505,7 @@ function buildSupport(
   // tipLen. If ≤ 0.2mm there's no room for a shaft → Leaf (cone straight from the
   // knot). Otherwise → Branch (single segment knot → socket + short native cone).
   // All extra tips share one knot on the shaft (Chitu roots them at the pillar top).
+  const fanLeafIds = new Set<string>();
   if (extraTips.length > 0) {
     const topSegment = segments[segments.length - 1];
     // Place the shared knot at the AUTHORED knot height (knotCenter) — the LYS
@@ -326,6 +527,12 @@ function buildSupport(
     };
     knots.push(sharedKnot);
 
+    // forceLeaf: these extra tips are an authored FAN. Chitubox roots them all at
+    // one shared height and draws each as a single long cone to the model (see the
+    // reference screenshots). Under the length test they are 4-8mm from the knot,
+    // so every one became a Branch -- its own thin shaft plus a short cone -- which
+    // renders as splayed struts radiating outward instead of a clean fan, and
+    // invents shafts the file never authored. Same treatment as a stick's hub fan.
     for (const tip of extraTips) {
       const { leaf, branch } = buildTipFromKnot(
         tip,
@@ -336,8 +543,9 @@ function buildSupport(
         modelId,
         tipDefaults,
         mesh,
+        true,
       );
-      if (leaf) leaves.push(leaf);
+      if (leaf) { leaves.push(leaf); fanLeafIds.add(leaf.id); }
       if (branch) branches.push(branch);
     }
   }
@@ -351,7 +559,7 @@ function buildSupport(
   // recompute the mousewheel triggers), so the imported trunk renders correctly.
   applyTrunkDiameterProfile(trunk, rootTopZ, knots, branches);
 
-  return { root, trunk, knots, branches, leaves };
+  return { root, trunk, knots, branches, leaves, fanLeafIds: [...fanLeafIds] };
 }
 
 /** Resolve tip defaults from live settings if provided, else module fallback. */
@@ -422,7 +630,12 @@ export class CbxConverter {
     const trunks: Trunk[] = [];
     const knots: Knot[] = [];
     const branches: Branch[] = [];
+    const sticks: Stick[] = [];
     const leaves: Leaf[] = [];
+    // Leaves built on an authored FAN hub -- a stick's top knot or a junction
+    // knot. Both are authored at their final position, so the leaf sanity pass
+    // below must not re-classify them as branches by knot-to-contact length.
+    const stickHubLeafIds = new Set<string>();
     const braces: Brace[] = [];
 
     // Supports are emitted in the SAME world frame as the model geometry (raw +
@@ -497,6 +710,23 @@ export class CbxConverter {
 
     for (const s of supportsForBuild) {
       try {
+        // A support with a downward contact spans between two parts of the
+        // model rather than standing on the plate: DragonFruit models that as a
+        // Stick, whose two contact cones are the downward tip and the upward tip
+        // best continuing the shaft's line, with the pillar as its body. Any
+        // remaining upward tips fan off the hub knot as leaves.
+        if (s.downwardTip && s.tips.length > 0) {
+          const stick = buildStick(s, placeholderModelId, raftZ, tipDefaults, mesh);
+          if (stick) {
+            sticks.push(stick.stick);
+            knots.push(...stick.knots);
+            branches.push(...stick.branches);
+            leaves.push(...stick.leaves);
+            for (const l of stick.leaves) stickHubLeafIds.add(l.id);
+            continue;
+          }
+        }
+
         const built = buildSupport(
           s, placeholderModelId, raftZ, tipDefaults, rootDefaults, shaftDefaults, mesh,
         );
@@ -505,6 +735,7 @@ export class CbxConverter {
         knots.push(...built.knots);
         branches.push(...built.branches);
         leaves.push(...built.leaves);
+        for (const id of built.fanLeafIds) stickHubLeafIds.add(id);
 
         if (s.isForkJunction) {
           forkJunctionTrunks.push({
@@ -563,15 +794,52 @@ export class CbxConverter {
     const modelBraces = model.braces ?? [];
     let bracesAttached = 0;
     let bracesDropped = 0;
-    const nearestShaft = (x: number, y: number): ShaftRef | null => {
+    /**
+     * Resolve the pillar a brace endpoint attaches to.
+     *
+     * XY alone is NOT enough. On stacked-tier models (Supported_Chest_Back) 148 of
+     * 534 brace endpoints have two or more pillars inside the 1mm XY tolerance --
+     * tiers sitting almost directly above one another, e.g. z-spans
+     * [-50.48..-40.37] and [-43.30..-39.95] at the same XY. Picking by XY distance
+     * alone can bind the endpoint to the wrong tier, and the brace then stretches
+     * from its authored end to a shaft somewhere else entirely: the "really long
+     * super brace" artefact. Authored braces on this model are all short 45deg
+     * struts (max dXY 6.28mm, dz == dXY), so any long result is manufactured.
+     *
+     * Scoring the endpoint in 3D against each candidate's actual SEGMENTS picks the
+     * tier that truly contains it, because a pillar whose Z span excludes the
+     * endpoint scores its (large) distance to the nearer segment end.
+     */
+    const nearestShaft = (x: number, y: number, z?: number): ShaftRef | null => {
       let best: ShaftRef | null = null;
       let bestD = Infinity;
       for (const r of shaftRefs) {
-        const d = (r.px - x) ** 2 + (r.py - y) ** 2;
+        const dxy = (r.px - x) ** 2 + (r.py - y) ** 2;
+        // Reject anything outside the XY tolerance first (unchanged behaviour).
+        if (dxy > CBX_BRACE_ATTACH_TOL_MM * CBX_BRACE_ATTACH_TOL_MM) continue;
+        // Within tolerance, rank by true 3D distance to the pillar's segments so
+        // the correct TIER wins rather than whichever is marginally closer in XY.
+        let d = dxy;
+        if (z !== undefined) {
+          d = Infinity;
+          for (const seg of r.segments) {
+            const ax = seg.start.x, ay = seg.start.y, az = seg.start.z;
+            const bx = seg.end.x, by = seg.end.y, bz = seg.end.z;
+            const abx = bx - ax, aby = by - ay, abz = bz - az;
+            const abLenSq = abx * abx + aby * aby + abz * abz;
+            let t = 0;
+            if (abLenSq > 1e-8) {
+              t = ((x - ax) * abx + (y - ay) * aby + (z - az) * abz) / abLenSq;
+              t = t < 0 ? 0 : t > 1 ? 1 : t;
+            }
+            const cx = ax + abx * t, cy = ay + aby * t, cz = az + abz * t;
+            const dd = (cx - x) ** 2 + (cy - y) ** 2 + (cz - z) ** 2;
+            if (dd < d) d = dd;
+          }
+        }
         if (d < bestD) { bestD = d; best = r; }
       }
-      // Only accept a match within a small radius (endpoints sit on pillar XY).
-      return best && bestD <= CBX_BRACE_ATTACH_TOL_MM * CBX_BRACE_ATTACH_TOL_MM ? best : null;
+      return best;
     };
 
     // Project a world point onto a pillar's segments and return the closest one,
@@ -604,8 +872,9 @@ export class CbxConverter {
     };
 
     for (const b of modelBraces) {
-      const shaftA = nearestShaft(b.ax, b.ay);
-      const shaftB = nearestShaft(b.bx, b.by);
+      // Pass Z so a stacked tier cannot be mis-picked (see nearestShaft).
+      const shaftA = nearestShaft(b.ax, b.ay, b.az - raftZ);
+      const shaftB = nearestShaft(b.bx, b.by, b.bz - raftZ);
       if (!shaftA || !shaftB || shaftA === shaftB) {
         bracesDropped++;
         continue;
@@ -640,8 +909,31 @@ export class CbxConverter {
         diameter: jointDiameter,
         _importHint: 'braceImported',
       };
-      knots.push(knotA, knotB);
+      // Sanity: a rebuilt brace must stay close to its AUTHORED span. The knots
+      // are projected onto their host shafts, so a mis-resolved tier shows up as a
+      // rebuilt strut far longer than the record describes. Authored braces on
+      // these files are short 45deg struts (Supported_Chest_Back: max 6.28mm), so
+      // a large overshoot means the endpoint bound to the wrong pillar -- drop it
+      // rather than draw a girder across the model.
+      const authoredLen = Math.hypot(
+        endpointB.x - endpointA.x, endpointB.y - endpointA.y, endpointB.z - endpointA.z,
+      );
+      const builtLen = Math.hypot(
+        projB.pos.x - projA.pos.x, projB.pos.y - projA.pos.y, projB.pos.z - projA.pos.z,
+      );
+      if (builtLen > authoredLen * 2 + 2) {
+        if (CBX_DEBUG) {
+          cbxDebug(
+            `BRACE-REJECT authored=${authoredLen.toFixed(2)}mm built=${builtLen.toFixed(2)}mm `
+            + `A=(${endpointA.x.toFixed(2)},${endpointA.y.toFixed(2)},${endpointA.z.toFixed(2)}) `
+            + `B=(${endpointB.x.toFixed(2)},${endpointB.y.toFixed(2)},${endpointB.z.toFixed(2)})`,
+          );
+        }
+        bracesDropped++;
+        continue;
+      }
 
+      knots.push(knotA, knotB);
       braces.push({
         id: uuidv4(),
         modelId: placeholderModelId,
@@ -669,8 +961,10 @@ export class CbxConverter {
     // off-model contact.
     let supportBracesEmitted = 0;
     for (const pb of pendingSupportBraces) {
-      const targetShaft = nearestShaft(pb.targetPillarX, pb.targetPillarY);
-      const sourceShaft = nearestShaft(pb.sourcePillarX, pb.sourcePillarY);
+      // The authored contact height is the attach Z for both ends of this strut,
+      // so use it to disambiguate stacked tiers (see nearestShaft).
+      const targetShaft = nearestShaft(pb.targetPillarX, pb.targetPillarY, pb.contact.z);
+      const sourceShaft = nearestShaft(pb.sourcePillarX, pb.sourcePillarY, pb.contact.z);
       if (!targetShaft || !sourceShaft || targetShaft === sourceShaft) {
         continue;
       }
@@ -856,7 +1150,7 @@ export class CbxConverter {
 
       // Parent the branch to the grounded pillar's shaft at the parent point. If
       // no shaft resolves there, skip (can't attach a free-floating branch).
-      const parentRef = nearestShaft(parentPos.x, parentPos.y);
+      const parentRef = nearestShaft(parentPos.x, parentPos.y, parentPos.z);
       if (!parentRef) { junctionDropped++; continue; }
       const proj = projectToShaft(parentRef, parentPos);
       const parentKnot: Knot = {
@@ -917,8 +1211,9 @@ export class CbxConverter {
       };
       knots.push(junctionKnot);
 
-      // Every junction tip radiates from the junction knot as a Leaf (short) or a
-      // Branch (long: thin shaft + short native cone), same as multi-tip trunk tips.
+      // Junction tips radiate from the junction knot as an authored FAN, same as
+      // a multi-tip trunk's extra tips and a stick's hub -- forceLeaf, so the
+      // knot-to-contact length test does not split them into separate shafts.
       for (const tip of jb.tips) {
         const { leaf, branch } = buildTipFromKnot(
           tip,
@@ -929,8 +1224,9 @@ export class CbxConverter {
           placeholderModelId,
           tipDefaults,
           mesh,
+          true,
         );
-        if (leaf) leaves.push(leaf);
+        if (leaf) { leaves.push(leaf); stickHubLeafIds.add(leaf.id); }
         if (branch) branches.push(branch);
         junctionTipsBuilt++;
       }
@@ -957,8 +1253,7 @@ export class CbxConverter {
     // face the model (not along the strut) and the twig renders like a native one.
     const modelTwigs = model.twigs ?? [];
     const twigs: Twig[] = [];
-    const JOINT_TAPER = 1.1; // twig joint = 1.1x its disk contact diameter
-    const JOINT_CLEARANCE_MM = 0.05;
+
     // Recover the model surface normal at a contact point. The contact sits ON the
     // model; we want the normal of the face it actually rests on, oriented OUT of the
     // solid (the direction the twig disk stands off). The earlier approach cast a
@@ -1148,6 +1443,9 @@ export class CbxConverter {
     // Here we re-check every leaf against its FINAL knot position and convert any
     // over-long one into a Branch (shaft knot→socket + short native cone), which
     // approaches the contact along the surface instead of cutting through.
+    //
+    // Stick-hub leaves are EXEMPT: their knot is authored at the hub and never
+    // relocated, so a long knot→contact distance is the intended fan, not drift.
     {
       const knotById = new Map(knots.map((k) => [k.id, k]));
       const tipLen = CBX_TIP_DEFAULTS.lengthMm;
@@ -1157,6 +1455,7 @@ export class CbxConverter {
         const knot = leaf.parentKnotId ? knotById.get(leaf.parentKnotId) : undefined;
         const cc = leaf.contactCone;
         if (!knot || !cc) { keptLeaves.push(leaf); continue; }
+        if (stickHubLeafIds.has(leaf.id)) { keptLeaves.push(leaf); continue; }
         const knotToContact = Math.hypot(cc.pos.x - knot.pos.x, cc.pos.y - knot.pos.y, cc.pos.z - knot.pos.z);
         if (knotToContact <= tipLen + LEAF_MAX_SHAFT_MM) { keptLeaves.push(leaf); continue; }
 
@@ -1256,7 +1555,7 @@ export class CbxConverter {
       branches,
       leaves,
       twigs,
-      sticks: [],
+      sticks,
       braces,
       anchors: [],
       knots,
@@ -1269,6 +1568,9 @@ export class CbxConverter {
       branches: result.branches.length,
       braces: result.braces.length,
       knots: result.knots.length,
+      leaves: result.leaves.length,
+      twigs: result.twigs?.length ?? 0,
+      sticks: result.sticks?.length ?? 0,
       raftZ,
     });
 
