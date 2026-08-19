@@ -321,6 +321,7 @@ export async function importCbxFile(
     console.log('[chitubox-import][debug] multi-model payloads generated', {
       payloadCount: payloads.length,
       modelIds: payloads.map((p) => p.modelId),
+      objNames: payloads.map((p) => p.objName ?? '(none)'),
       supportSummaries: payloads.map((p) => ({
         modelId: p.modelId,
         ...summarizeImportSupportData(p.supportData),
@@ -338,6 +339,7 @@ export async function importCbxFile(
 
   console.log('[chitubox-import][debug] single-model payload generated', {
     modelId: payload.modelId,
+    objName: payload.objName ?? '(none)',
     supportSummary: summarizeImportSupportData(payload.supportData),
   });
 
