@@ -88,7 +88,14 @@ function f32(view: DataView, off: number): number {
  * Returns null when no TAG record sits within INLINE_PAD_MAX bytes.
  */
 function resolveSupportBlock(view: DataView, len: number, supPtr: number): number | null {
-  // Try the two known pads first so a well-formed file never matches by chance.
+  // The block header at supPtr carries the record-block address at +4. Verified
+  // against 181/181 support blocks, so the pad is authored, not fixed: it is 436
+  // under a 412-byte file header and 416 under a 420-byte one.
+  if (supPtr + 8 <= len) {
+    const authored = u32(view, supPtr + 4);
+    if (authored > 0 && authored + 4 <= len && u32(view, authored) === TAG_EA) return authored;
+  }
+  // Fall back to the historically observed pads before scanning.
   for (const pad of [INLINE_PAD, 416]) {
     const base = supPtr + pad;
     if (base > 0 && base + 4 <= len && u32(view, base) === TAG_EA) return base;
@@ -875,7 +882,16 @@ export class CbxParser {
     // field8 doubles as the record-table pointer: it addresses the first
     // record, whose leading member is that same filename string.
     const tablePtr = fnamePtr;
-    const meshOffset = u32(view, 424);
+
+    // field12 is the header length, and the mesh-section pointer and its
+    // table delta sit at fixed offsets INSIDE that header rather than at
+    // absolute addresses. A newer writer grew the header from 412 to 420
+    // bytes (recording the old length in field16), which shifts both fields.
+    // Reading them at a hardcoded 424/444 works only for the 412-byte header.
+    const headerLen = u32(view, 12);
+    const headerLenUsable = headerLen > 0 && headerLen + 16 <= len;
+    const meshOffset = headerLenUsable ? u32(view, headerLen + 12) : u32(view, 424);
+    const tableDelta = headerLenUsable ? u32(view, headerLen + 8) : 444;
 
     const filename = decodeCString(bytes, fnamePtr, 64) || sourceName;
 
@@ -1007,7 +1023,7 @@ export class CbxParser {
     };
 
     const findRecordBase = (): number => {
-      const expected = meshOffset + 444;
+      const expected = meshOffset + tableDelta;
       // Checked first, so a valid file can never match elsewhere by chance.
       if (meshOffset > 0 && meshOffset < len && baseLooksValid(expected)) {
         return expected;
@@ -1021,7 +1037,7 @@ export class CbxParser {
         if (tablePtr !== expected) {
           console.warn(
             `${LOG_PREFIX} record table taken from header field 8 (${tablePtr}); `
-            + `meshOffset+444 would have given ${expected}.`,
+            + `meshOffset+${tableDelta} would have given ${expected}.`,
           );
         }
         return tablePtr;
@@ -1054,7 +1070,7 @@ export class CbxParser {
       // report the failure as they always have.
       console.warn(
         `${LOG_PREFIX} could not locate a valid record table (meshOffset=${meshOffset}); `
-        + `falling back to meshOffset+444.`,
+        + `falling back to meshOffset+${tableDelta}.`,
       );
       return expected;
     };
