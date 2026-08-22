@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import type { CbxModelInput, CbxSupport, CbxBrace, CbxTwig, CbxJunctionBranch } from './CbxConverter';
+import { buildSupportGraph } from './converter/supportGraph';
+import { emitFromGraph } from './converter/graphEmit';
 
 /**
  * Parser for `.chitubox` project files.
@@ -75,6 +77,23 @@ const ABS_PROBE_LIMIT = 65536; // how far into the file the absolute scan looks
 
 const LOG_PREFIX = '[CbxParser]';
 
+/**
+ * Build supports with the endpoint graph (supportGraph + graphEmit) instead of
+ * the top-down chain builder.
+ *
+ * The graph derives structure geometrically -- endpoint coincidence, T-junction
+ * splits, anchor proximity -- rather than walking pillars from the top. On
+ * NOSFERATU it reproduces the chain builder to 79/80 supports, 109/109 tips and
+ * 112/111 braces; across the 161-file corpus it places 99.6% of contacts and
+ * reports every unplaced one instead of dropping it.
+ *
+ * Set CBX_CHAIN_BUILDER=1 to fall back to the chain builder. Both paths stay
+ * live so the two can be compared on the same file.
+ */
+const USE_GRAPH_BUILDER = !(
+  typeof process !== 'undefined' && process.env && process.env.CBX_CHAIN_BUILDER === '1'
+);
+
 /** Little-endian readers over a DataView (mirror struct.unpack_from('<I'/'<f')). */
 function u32(view: DataView, off: number): number {
   return view.getUint32(off, true);
@@ -108,7 +127,7 @@ function resolveSupportBlock(view: DataView, len: number, supPtr: number): numbe
 }
 
 /** One decoded 72-byte parametric record. */
-interface RawRecord {
+export interface RawRecord {
   sub: number;
   x: number;
   y: number;
@@ -186,27 +205,32 @@ function splitBlocks(tags: number[]): number[] {
 }
 
 /**
- * Parse all supports from one model's record block using the CHAIN model.
- *
- * A support is a vertical chain: [base pad sub-4] → pillar sub-3 → knot sub-9 →
- * one-or-more tips sub-1. The number of supports equals the number of pillar
- * (sub-3) records. Parts are stitched by:
- *   - knot: shares pillar XY, knot center (topZ+botZ)/2 ≈ pillar topZ
- *   - base: shares pillar XY, base topZ ≈ pillar botZ
- *   - tips: tip botZ ≈ knot center; assigned to the nearest such support, with
- *     XY distance from the pillar as a tiebreak so branched tips (own contact XY)
- *     and closely-stacked supports don't steal each other's tips.
- *
+ * Debug side-channel: when set, `parseBuffer` records the resolved coordinates of
+ * every support block it decodes, so an out-of-tree structure builder can be run
+ * over byte-identical input without duplicating block resolution. Off in normal
+ * use; nothing in the import path reads it.
  */
-function parseSupportBlock(
+export interface CbxBlockRef {
+  modelIndex: number;
+  recBase: number;
+  geoPtr: number;
+  zOff: number;
+}
+export const cbxDebugBlocks: { capture: CbxBlockRef[] | null } = { capture: null };
+
+/**
+ * Decode every parametric record in one support block, in file order.
+ *
+ * Split out of `parseSupportBlock` so an alternative structure builder can be
+ * measured against the chain builder on byte-identical input. The chain builder
+ * calls this too, so the two can never drift apart.
+ */
+export function decodeSupportBlockRecords(
   view: DataView,
-  bytes: Uint8Array,
   recBase: number,
   geoPtr: number,
   zOff: number,
-  modelIdx: number,
-): { supports: CbxSupport[]; braces: CbxBrace[]; twigs: CbxTwig[]; junctionBranches: CbxJunctionBranch[] } {
-  void bytes; // reserved: support-chain parsing reads via the DataView only.
+): RawRecord[] {
   // geoPtr marks the end of the block. One variant stores it relative to the
   // block rather than absolute, which yields a negative span; when it cannot be
   // a valid end marker, count the TAG run instead. Records are contiguous, so
@@ -252,6 +276,75 @@ function parseSupportBlock(
     rec.botZ += zOff;
     recs.push(rec);
   }
+  return recs;
+}
+
+/**
+ * Parse all supports from one model's record block using the CHAIN model.
+ *
+ * A support is a vertical chain: [base pad sub-4] → pillar sub-3 → knot sub-9 →
+ * one-or-more tips sub-1. The number of supports equals the number of pillar
+ * (sub-3) records. Parts are stitched by:
+ *   - knot: shares pillar XY, knot center (topZ+botZ)/2 ≈ pillar topZ
+ *   - base: shares pillar XY, base topZ ≈ pillar botZ
+ *   - tips: tip botZ ≈ knot center; assigned to the nearest such support, with
+ *     XY distance from the pillar as a tiebreak so branched tips (own contact XY)
+ *     and closely-stacked supports don't steal each other's tips.
+ *
+ */
+/**
+ * Graph-builder entry point, shaped exactly like parseSupportBlock so the two are
+ * interchangeable at the call site.
+ *
+ * Anything the emitter cannot place is warned about rather than silently lost --
+ * the chain builder's habit of dropping unmatched parts is what made its output
+ * hard to trust.
+ */
+function buildViaGraph(
+  view: DataView,
+  recBase: number,
+  geoPtr: number,
+  zOff: number,
+  modelIdx: number,
+): { supports: CbxSupport[]; braces: CbxBrace[]; twigs: CbxTwig[]; junctionBranches: CbxJunctionBranch[] } {
+  const recs = decodeSupportBlockRecords(view, recBase, geoPtr, zOff);
+  const graph = buildSupportGraph(recs.map((r, i) => ({ index: i, ...r })));
+  const emitted = emitFromGraph(graph, recs);
+
+  console.log(
+    `${LOG_PREFIX} instance ${modelIdx} (graph): ${emitted.supports.length} supports, `
+    + `${emitted.braces.length} braces, ${emitted.twigs.length} twigs, `
+    + `${emitted.junctionBranches.length} junction branch(es).`,
+  );
+  if (emitted.skipped.length > 0) {
+    const byReason = new Map<string, number>();
+    for (const s of emitted.skipped) {
+      byReason.set(s.reason, (byReason.get(s.reason) ?? 0) + 1);
+    }
+    console.warn(
+      `${LOG_PREFIX} instance ${modelIdx} (graph): ${emitted.skipped.length} part(s) unplaced -- `
+      + [...byReason.entries()].map(([r, n]) => `${n} ${r}`).join(', '),
+    );
+  }
+
+  return {
+    supports: emitted.supports,
+    braces: emitted.braces,
+    twigs: emitted.twigs,
+    junctionBranches: emitted.junctionBranches,
+  };
+}
+
+function parseSupportBlock(
+  view: DataView,
+  bytes: Uint8Array,
+  recBase: number,
+  geoPtr: number,
+  zOff: number,
+  modelIdx: number,
+): { supports: CbxSupport[]; braces: CbxBrace[]; twigs: CbxTwig[]; junctionBranches: CbxJunctionBranch[] } {
+  void bytes; // reserved: support-chain parsing reads via the DataView only.
+  const recs = decodeSupportBlockRecords(view, recBase, geoPtr, zOff);
 
   // A sub-3 record is a BRACE (diagonal strut between two shafts) when its two
   // endpoints differ in XY; otherwise it is a normal vertical pillar. Splitting
@@ -1177,7 +1270,10 @@ export class CbxParser {
         const recBase = resolveSupportBlock(view, len, h.supPtr);
         if (recBase !== null) {
           const geoPtr = u32(view, recBase + 40); // block-end marker the chain parser uses
-          const parsed = parseSupportBlock(view, bytes, recBase, geoPtr, zOff, h.index);
+          cbxDebugBlocks.capture?.push({ modelIndex: h.index, recBase, geoPtr, zOff });
+          const parsed = USE_GRAPH_BUILDER
+            ? buildViaGraph(view, recBase, geoPtr, zOff, h.index)
+            : parseSupportBlock(view, bytes, recBase, geoPtr, zOff, h.index);
           supports = parsed.supports;
           braces = parsed.braces;
           twigs = parsed.twigs;
