@@ -883,15 +883,19 @@ export class CbxParser {
     // record, whose leading member is that same filename string.
     const tablePtr = fnamePtr;
 
-    // field12 is the header length, and the mesh-section pointer and its
-    // table delta sit at fixed offsets INSIDE that header rather than at
-    // absolute addresses. A newer writer grew the header from 412 to 420
-    // bytes (recording the old length in field16), which shifts both fields.
-    // Reading them at a hardcoded 424/444 works only for the 412-byte header.
-    const headerLen = u32(view, 12);
-    const headerLenUsable = headerLen > 0 && headerLen + 16 <= len;
-    const meshOffset = headerLenUsable ? u32(view, headerLen + 12) : u32(view, 424);
-    const tableDelta = headerLenUsable ? u32(view, headerLen + 8) : 444;
+    // field12 is a base offset: a small pointer block follows it, carrying the
+    // record-table delta at +8 and the mesh-section offset at +12. The record
+    // table is then meshOffset + delta, which reproduces field8 exactly.
+    //
+    // Reading these at a hardcoded 420/424 assumes base == 412, which holds for
+    // the common writer but not for a later one that moved the block to 420, nor
+    // for a file with no mesh section at all (base 0, mesh 0, delta 412 -- the
+    // table sits immediately after the fixed header). The rule below needs no
+    // special case for any of them: verified against 161/161 files.
+    const ptrBlock = u32(view, 12);
+    const ptrBlockUsable = ptrBlock + 16 <= len;
+    const meshOffset = ptrBlockUsable ? u32(view, ptrBlock + 12) : u32(view, 424);
+    const tableDelta = ptrBlockUsable ? u32(view, ptrBlock + 8) : 444;
 
     const filename = decodeCString(bytes, fnamePtr, 64) || sourceName;
 

@@ -83,7 +83,10 @@ function buildChainBlob(opts?: {
   const u8 = new Uint8Array(buf);
   dv.setUint32(0, MAGIC, true);
   dv.setUint32(4, 1, true); // nInstances
-  dv.setUint32(424, meshOffset, true);
+  dv.setUint32(8, recStart, true); // field8: absolute record-table offset
+  dv.setUint32(12, 412, true); // field12: pointer-block base
+  dv.setUint32(412 + 8, 444, true); // table delta
+  dv.setUint32(412 + 12, meshOffset, true); // mesh-section offset
 
   // Filename + record tail.
   for (let i = 0; i < fname.length; i++) u8[recStart + i] = fname.charCodeAt(i);
