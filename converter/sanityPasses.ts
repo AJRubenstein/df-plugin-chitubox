@@ -422,3 +422,80 @@ export function collapseDegenerateJoints(input: JointCollapseInput): number {
   for (const b of branches) collapseSupport(b);
   return removed;
 }
+
+// --- Coincident-joint dedup --------------------------------------------------
+
+/** Distance under which two DISTINCT joints are treated as the same articulation. */
+const COINCIDENT_JOINT_MM = 0.02;
+
+export interface JointDedupInput {
+  /** Every support whose segments may carry duplicate joints (mutated in place). */
+  supports: CollapsibleSupport[];
+  /** All knots — repointed when the joint they sit on is replaced. */
+  knots: CenterableKnot[];
+}
+
+/**
+ * Merge joints that occupy the same point but are separate objects.
+ *
+ * Adjacent segments in a chain legitimately SHARE one joint by reference
+ * (segment N's topJoint IS segment N+1's bottomJoint), so a shared joint is not a
+ * duplicate. A duplicate is two distinct joint objects at the same position: it
+ * renders as one sphere but behaves as two, and dragging one leaves the other
+ * behind. Builders that assemble a support from separately-created pieces — stick
+ * fans, junction branches, brace anchors — can produce these when two pieces
+ * independently create a joint at the same attachment point.
+ *
+ * The first joint encountered at a position wins; later ones are replaced by
+ * reference so the chain stays connected. Knots sitting on a dropped joint are
+ * moved to the keeper.
+ *
+ * Returns the number of joint objects replaced.
+ */
+export function dedupeCoincidentJoints(input: JointDedupInput): number {
+  const { supports, knots } = input;
+
+  // Bucket by quantised position so lookup is O(1) rather than O(n^2).
+  const key = (p: { x: number; y: number; z: number }): string => {
+    const q = (v: number) => Math.round(v / COINCIDENT_JOINT_MM);
+    return `${q(p.x)}:${q(p.y)}:${q(p.z)}`;
+  };
+
+  const keeperByKey = new Map<string, CollapsibleJoint>();
+  const replacedIds = new Map<string, CollapsibleJoint>();
+  let replaced = 0;
+
+  const resolve = (joint: CollapsibleJoint | undefined): CollapsibleJoint | undefined => {
+    if (!joint) return joint;
+    const k = key(joint.pos);
+    const keeper = keeperByKey.get(k);
+    if (!keeper) {
+      keeperByKey.set(k, joint);
+      return joint;
+    }
+    if (keeper === joint) return joint; // legitimately shared by reference
+    replacedIds.set(joint.id, keeper);
+    replaced++;
+    return keeper;
+  };
+
+  for (const support of supports) {
+    for (const seg of support.segments) {
+      seg.bottomJoint = resolve(seg.bottomJoint);
+      seg.topJoint = resolve(seg.topJoint);
+    }
+  }
+
+  // Any knot sitting exactly on a dropped joint follows it to the keeper.
+  if (replacedIds.size > 0) {
+    for (const knot of knots) {
+      const keeper = keeperByKey.get(key(knot.pos));
+      if (!keeper) continue;
+      knot.pos.x = keeper.pos.x;
+      knot.pos.y = keeper.pos.y;
+      knot.pos.z = keeper.pos.z;
+    }
+  }
+
+  return replaced;
+}

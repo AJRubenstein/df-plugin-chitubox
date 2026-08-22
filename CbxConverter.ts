@@ -118,7 +118,7 @@ import {
   applyXYShift as clusterApplyXYShift,
   seatRootsOnPlate as clusterSeatRootsOnPlate,
 } from './converter/clusterTransform';
-import { classifySupportTips, centerCoincidentKnots, collapseDegenerateJoints } from './converter/sanityPasses';
+import { classifySupportTips, centerCoincidentKnots, collapseDegenerateJoints, dedupeCoincidentJoints } from './converter/sanityPasses';
 
 /** Output of converting one support: the entities it contributes. */
 interface BuiltSupport {
@@ -1576,6 +1576,22 @@ export class CbxConverter {
       const collapsed = collapseDegenerateJoints({ trunks, branches, knots });
       if (CBX_DEBUG && collapsed > 0) {
         cbxDebug(`joint-collapse pass: removed ${collapsed} degenerate shaft stub(s)`);
+      }
+    }
+
+    // --- Coincident-joint dedup --------------------------------------------
+    // Two DISTINCT joint objects at one point render as a single sphere but
+    // behave as two: dragging one leaves the other behind. Adjacent segments
+    // legitimately share a joint by reference, which this pass leaves alone.
+    // Covers every support type, not just trunks/branches, because stick fans
+    // and twigs are assembled from separately-created pieces.
+    {
+      const deduped = dedupeCoincidentJoints({
+        supports: [...trunks, ...branches, ...twigs, ...sticks],
+        knots,
+      });
+      if (CBX_DEBUG && deduped > 0) {
+        cbxDebug(`joint-dedup pass: merged ${deduped} coincident joint(s)`);
       }
     }
 
