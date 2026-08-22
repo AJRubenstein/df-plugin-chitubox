@@ -48,6 +48,11 @@ const MODEL_HDR_SUB = 2; // skip
 const SUMMARY_SUB = 6; // skip (was previously NOT skipped — bug)
 
 const INLINE_PAD = 436;
+// The gap from an instance's support pointer to its first TAG record. 436 in
+// the common layout, 416 in the field12 == 420 variant. Rather than key off the
+// variant, seek the TAG: the pad is a fixed header whose size is the only thing
+// that moves, and a wrong guess silently drops every support on the instance.
+const INLINE_PAD_MAX = 512;
 const COORD_LIMIT = 500; // reject vertices outside ±500mm (matches Python guard)
 // A sub-3 record whose two endpoints differ in XY by more than this is a brace
 // (diagonal shaft-to-shaft strut) rather than a vertical pillar. Vertical pillars
@@ -76,6 +81,23 @@ function u32(view: DataView, off: number): number {
 }
 function f32(view: DataView, off: number): number {
   return view.getFloat32(off, true);
+}
+
+/**
+ * Resolve an instance's support pointer to the start of its parametric block.
+ * Returns null when no TAG record sits within INLINE_PAD_MAX bytes.
+ */
+function resolveSupportBlock(view: DataView, len: number, supPtr: number): number | null {
+  // Try the two known pads first so a well-formed file never matches by chance.
+  for (const pad of [INLINE_PAD, 416]) {
+    const base = supPtr + pad;
+    if (base > 0 && base + 4 <= len && u32(view, base) === TAG_EA) return base;
+  }
+  const limit = Math.min(len - 4, supPtr + INLINE_PAD_MAX);
+  for (let base = Math.max(0, supPtr); base <= limit; base += 4) {
+    if (u32(view, base) === TAG_EA) return base;
+  }
+  return null;
 }
 
 /** One decoded 72-byte parametric record. */
@@ -183,7 +205,18 @@ function parseSupportBlock(
   modelIdx: number,
 ): { supports: CbxSupport[]; braces: CbxBrace[]; twigs: CbxTwig[]; junctionBranches: CbxJunctionBranch[] } {
   void bytes; // reserved: support-chain parsing reads via the DataView only.
-  const totalRecBytes = geoPtr - recBase;
+  // geoPtr marks the end of the block. One variant stores it relative to the
+  // block rather than absolute, which yields a negative span; when it cannot be
+  // a valid end marker, count the TAG run instead. Records are contiguous, so
+  // walking until the tag stops matching gives the same total.
+  let totalRecBytes = geoPtr - recBase;
+  if (totalRecBytes <= 0 || recBase + totalRecBytes > view.byteLength) {
+    let end = recBase;
+    while (end + REC_SIZE <= view.byteLength && u32(view, end) === TAG_EA) {
+      end += REC_SIZE;
+    }
+    totalRecBytes = end - recBase;
+  }
   const totalRecs = Math.floor(totalRecBytes / REC_SIZE);
 
   // Decode every record in the block (world-frame Z), skipping header + summary.
@@ -719,7 +752,12 @@ function parseSupportBlock(
  * or null if no plausible table is found. Used for files without a usable
  * meshOffset, where this is the only way to find where geometry begins.
  */
-function earliestGeometryStart(view: DataView, len: number, nInstances: number): number | null {
+function earliestGeometryStart(
+  view: DataView,
+  len: number,
+  nInstances: number,
+  tablePtr = 0,
+): number | null {
   const TAIL_OFF = 256;
   const STRIDE_OFF = 680;
 
@@ -734,7 +772,13 @@ function earliestGeometryStart(view: DataView, len: number, nInstances: number):
     );
   };
 
-  for (let base = 0; base < Math.min(ABS_PROBE_LIMIT, len); base += 4) {
+  // The scan below only reaches ABS_PROBE_LIMIT; a table beyond that is found
+  // only via the header pointer.
+  const candidates: number[] = [];
+  if (tablePtr > 0 && tablePtr < len) candidates.push(tablePtr);
+  for (let base = 0; base < Math.min(ABS_PROBE_LIMIT, len); base += 4) candidates.push(base);
+
+  for (const base of candidates) {
     if (!recValid(base)) continue;
     if (nInstances >= 2 && !recValid(base + STRIDE_OFF)) continue;
     let earliest = len;
@@ -828,6 +872,9 @@ export class CbxParser {
 
     const nInstances = u32(view, 4); // field4 = total instance count
     const fnamePtr = u32(view, 8);
+    // field8 doubles as the record-table pointer: it addresses the first
+    // record, whose leading member is that same filename string.
+    const tablePtr = fnamePtr;
     const meshOffset = u32(view, 424);
 
     const filename = decodeCString(bytes, fnamePtr, 64) || sourceName;
@@ -847,16 +894,31 @@ export class CbxParser {
 
     // Primary model tri count lives at mesh_offset + 720. It marks where
     // geometry begins, bounding the support-record and Z-offset scans below.
-    const modelBytes0 = meshOffsetUsable ? u32(view, meshOffset + 720) : 0;
+    // A meshOffset that passes the range check above can still be a non-header
+    // field in an unfamiliar layout, in which case this reads as a nonsense
+    // triangle count. Anything that cannot describe a real span inside the file
+    // is discarded, and the derived start is clamped: an unclamped negative
+    // modelStart makes the scans below read outside the DataView and throw.
+    const rawModelBytes0 = meshOffsetUsable ? u32(view, meshOffset + 720) : 0;
+    const modelBytes0 = rawModelBytes0 > 0 && rawModelBytes0 <= len && rawModelBytes0 % 36 === 0
+      ? rawModelBytes0
+      : 0;
+    if (rawModelBytes0 > 0 && modelBytes0 === 0) {
+      console.warn(
+        `${LOG_PREFIX} implausible model byte count (${rawModelBytes0}) at meshOffset+720 `
+        + `for a ${len}-byte file; ignoring it and scanning from the record table instead.`,
+      );
+    }
     let modelStart = modelBytes0 > 0
       ? len - Math.floor(modelBytes0 / 36) * 36
       : len;
+    modelStart = Math.max(0, Math.min(modelStart, len));
 
     // Without meshOffset that shortcut is unavailable and modelStart is left at
     // EOF, which would let the scans run over the geometry and read a mesh
     // vertex as the plate Z. Derive the boundary from the record table instead.
-    if (!meshOffsetUsable) {
-      const earliest = earliestGeometryStart(view, len, nInstances);
+    if (!meshOffsetUsable || modelBytes0 === 0) {
+      const earliest = earliestGeometryStart(view, len, nInstances, tablePtr);
       if (earliest !== null && earliest < modelStart) {
         modelStart = earliest;
       }
@@ -870,7 +932,7 @@ export class CbxParser {
     // Z offset: most-negative plausible float in the post-header scan region.
     const scanStart = hasSupports ? firstTag : modelStart;
     let minZ = 0.0;
-    for (let i = scanStart; i < len - 3; i += 4) {
+    for (let i = Math.max(0, scanStart); i < len - 3; i += 4) {
       const fv = f32(view, i);
       if (!Number.isNaN(fv) && fv > -500.0 && fv < 0.0 && fv < minZ) {
         minZ = fv;
@@ -949,6 +1011,20 @@ export class CbxParser {
       // Checked first, so a valid file can never match elsewhere by chance.
       if (meshOffset > 0 && meshOffset < len && baseLooksValid(expected)) {
         return expected;
+      }
+      // Header field 8 points straight at the first record in every file that
+      // has a table. Most writers keep it in sync with meshOffset+444, but one
+      // variant (field12 == 420, carrying explicit table bounds in fields 16/20)
+      // puts the table megabytes away from meshOffset, out of reach of both the
+      // nearby-shift and absolute scans below.
+      if (tablePtr > 0 && tablePtr < len && baseLooksValid(tablePtr)) {
+        if (tablePtr !== expected) {
+          console.warn(
+            `${LOG_PREFIX} record table taken from header field 8 (${tablePtr}); `
+            + `meshOffset+444 would have given ${expected}.`,
+          );
+        }
+        return tablePtr;
       }
       // Nearby shifts, smallest displacement first.
       if (meshOffset > 0 && meshOffset < len) {
@@ -1071,8 +1147,8 @@ export class CbxParser {
       let twigs: CbxTwig[] = [];
       let junctionBranches: CbxJunctionBranch[] = [];
       if (h.supPtr !== NO_SUPPORT && h.supPtr !== 0) {
-        const recBase = h.supPtr + INLINE_PAD;
-        if (recBase > 0 && recBase < len && u32(view, recBase) === TAG_EA) {
+        const recBase = resolveSupportBlock(view, len, h.supPtr);
+        if (recBase !== null) {
           const geoPtr = u32(view, recBase + 40); // block-end marker the chain parser uses
           const parsed = parseSupportBlock(view, bytes, recBase, geoPtr, zOff, h.index);
           supports = parsed.supports;
@@ -1081,8 +1157,8 @@ export class CbxParser {
           junctionBranches = parsed.junctionBranches;
         } else {
           console.warn(
-            `${LOG_PREFIX} instance ${h.index}: support pointer ${h.supPtr} (+${INLINE_PAD} `
-            + `= ${recBase}) does not land on a TAG record; skipping supports.`,
+            `${LOG_PREFIX} instance ${h.index}: no TAG record within `
+            + `${INLINE_PAD_MAX} bytes of support pointer ${h.supPtr}; skipping supports.`,
           );
         }
       }
