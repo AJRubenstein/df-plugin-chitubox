@@ -196,12 +196,25 @@ describe('CbxParser.parseBuffer — chain model', () => {
  * 8 tips, including branched support IV). Ground truth comes from an independent
  * Cbx layer scrub, NOT the (previously-buggy) Python oracle.
  *
- * Auto-skips when the fixture is absent.
+ * The fixture is a 3.8 MB binary and is not committed. Drop SPOTLIGHT.chitubox
+ * beside this file, or point CBX_FIXTURES at a directory holding it:
+ *
+ *   CBX_FIXTURES="R:/allancodejunk/techno sun goddess" npx tsx --test CbxParser.test.ts
+ *
+ * Auto-skips when the fixture cannot be found.
  */
 describe('CbxParser real-file regression (SPOTLIGHT.chitubox)', () => {
   const fs = require('node:fs') as typeof import('node:fs');
   const path = require('node:path') as typeof import('node:path');
-  const fixture = path.join(__dirname, 'SPOTLIGHT.chitubox');
+  const candidates = [
+    path.join(__dirname, 'SPOTLIGHT.chitubox'),
+    ...(process.env.CBX_FIXTURES ?? '')
+      .split(/[;,]/)
+      .map((d) => d.trim())
+      .filter(Boolean)
+      .map((d) => path.join(d, 'SPOTLIGHT.chitubox')),
+  ];
+  const fixture = candidates.find((p) => fs.existsSync(p)) ?? candidates[0];
   const present = fs.existsSync(fixture);
 
   // Verified ground truth (world frame). Each entry: pillar diameter, base?,
