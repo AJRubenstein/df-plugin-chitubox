@@ -871,6 +871,44 @@ export class CbxConverter {
       return best!;
     };
 
+    // A brace endpoint whose projection is CLAMPED to a segment end (t 0 or 1) and
+    // still lands far from that end is a sign the host guess is poor: the authored
+    // point lies beyond the shaft entirely. LYS does not hit this because the .lys
+    // format names each endpoint's parent (parentBaseId / parentTipId), so its
+    // authored point is trustworthy; .chitubox has no such hint and this converter
+    // picks the nearest shaft, which can be the wrong one.
+    //
+    // The host preserves an authored brace position when the projection is an
+    // endpoint AND the reprojection distance exceeds this same threshold (see
+    // preserveAuthoredBracePos in supports/state.ts) -- a rule written for LYS,
+    // where the authored point is reliable. Left as 'braceImported' those knots
+    // render at a point with no shaft under it. Marking them 'project' instead
+    // takes the host's project fast path, so the knot is drawn on the shaft its
+    // t already refers to.
+    const BRACE_ENDPOINT_PRESERVE_TOL_MM = 0.5;
+    const braceProjectionIsUnreliable = (
+      authored: Vec3,
+      proj: { t: number; pos: Vec3 },
+    ): boolean => {
+      const clampedToEnd = proj.t <= 1e-4 || proj.t >= 1 - 1e-4;
+      if (!clampedToEnd) return false;
+      const dx = proj.pos.x - authored.x;
+      const dy = proj.pos.y - authored.y;
+      const dz = proj.pos.z - authored.z;
+      return Math.sqrt(dx * dx + dy * dy + dz * dz) > BRACE_ENDPOINT_PRESERVE_TOL_MM;
+    };
+    const braceKnotPos = (authored: Vec3, proj: { t: number; pos: Vec3 }): Vec3 => (
+      braceProjectionIsUnreliable(authored, proj)
+        ? { x: proj.pos.x, y: proj.pos.y, z: proj.pos.z }
+        : authored
+    );
+    const braceKnotHint = (
+      authored: Vec3,
+      proj: { t: number; pos: Vec3 },
+    ): Knot['_importHint'] => (
+      braceProjectionIsUnreliable(authored, proj) ? 'project' : 'braceImported'
+    );
+
     for (const b of modelBraces) {
       // Pass Z so a stacked tier cannot be mis-picked (see nearestShaft).
       const shaftA = nearestShaft(b.ax, b.ay, b.az - raftZ);
@@ -897,17 +935,17 @@ export class CbxConverter {
         id: uuidv4(),
         parentShaftId: projA.segmentId,
         t: projA.t,
-        pos: endpointA,
+        pos: braceKnotPos(endpointA, projA),
         diameter: jointDiameter,
-        _importHint: 'braceImported',
+        _importHint: braceKnotHint(endpointA, projA),
       };
       const knotB: Knot = {
         id: uuidv4(),
         parentShaftId: projB.segmentId,
         t: projB.t,
-        pos: endpointB,
+        pos: braceKnotPos(endpointB, projB),
         diameter: jointDiameter,
-        _importHint: 'braceImported',
+        _importHint: braceKnotHint(endpointB, projB),
       };
       // Sanity: a rebuilt brace must stay close to its AUTHORED span. The knots
       // are projected onto their host shafts, so a mis-resolved tier shows up as a
