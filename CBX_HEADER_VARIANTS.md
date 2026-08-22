@@ -1,98 +1,98 @@
-# .chitubox header variants
+# .chitubox header layout
 
-Findings from parsing 161 files (`R:\3dprintstuff`, `S:\mini-stls`, and the
-sample folder). Written after "Lance, head, small shields.chitubox" crashed the
-parser with `RangeError: Offset is outside the bounds of the DataView`.
+Findings from 161 files (`R:\3dprintstuff`, `S:\mini-stls`, sample folder),
+written after "Lance, head, small shields.chitubox" crashed the parser with
+`RangeError: Offset is outside the bounds of the DataView`.
 
-## Header fields
+**The format is versioned, not variant-ridden.** An earlier revision of this
+document described three "variants"; that was wrong, and the correction is the
+main content here.
 
-All offsets are from the start of the file, little-endian.
+## The header is length-prefixed
 
-| Offset | Name here | Meaning |
-|--------|-----------|---------|
-| 0   | `magic`      | `0xAB231243` |
-| 4   | `nInstances` | number of model instances (= record count) |
-| 8   | `f8`         | **absolute offset of the record table** (first record's filename) |
-| 12  | `f12`        | layout marker: `412`, `420`, or `0` |
-| 16  | `f16`        | variant C only: `412` |
-| 20  | `f20`        | variant C only: table end = `f8 + nInstances * 680` |
-| 424 | `meshOffset` | mesh-section pointer; the table is at `meshOffset + 444` in variant A only |
+`field12` (offset 12) is the **header length**. The mesh-section pointer and the
+record-table delta live at fixed offsets *inside* that header, so their absolute
+addresses move when the header size changes:
 
-The record table is `nInstances` records of **680 bytes**: a 256-byte
-NUL-padded filename followed by a 28-byte tail at `record + 256`.
+| Field | Location | Meaning |
+|-------|----------|---------|
+| `magic` | 0 | `0xAB231243` |
+| `nInstances` | 4 | model instance / record count |
+| `field8` | 8 | precomputed absolute offset of the record table |
+| `field12` | 12 | **header length** (412, 420, or 0) |
+| `field16` | 16 | previous header length, when the header has grown |
+| `field20` | 20 | table end = `field8 + nInstances * 680` |
+| `tableDelta` | **`field12 + 8`** | record table = `meshOffset + tableDelta` |
+| `meshOffset` | **`field12 + 12`** | mesh section pointer |
 
-## The three variants
-
-### A — common (158 / 161 files)
-
-```
-f12 = 412,  f16 = 0,  f20 = 0
-meshOffset valid,  meshOffset + 444 == f8
-```
-
-Both pointers agree. `meshOffset + 720` holds the primary model's triangle byte
-count, which locates the geometry section.
-
-### B — shifted table (1 / 161: `Cisne origami.chitubox`)
+Verified across the corpus:
 
 ```
-f12 = 412,  f16 = 0,  f20 = 0
-meshOffset valid,  meshOffset + 444 == f8 - 16
+meshOffset@(field12+12) + tableDelta@(field12+8) == field8    160 / 161 files
+field8 points at a valid record table                          161 / 161 files
 ```
 
-Header looks like variant A, but the table sits 16 bytes below where
-`meshOffset + 444` predicts. The pre-existing nearby-shift probe already
-absorbed this, logging `record table found at meshOffset+428 (expected +444)`.
+The record table is `nInstances` records of 680 bytes: a 256-byte NUL-padded
+filename, then a 28-byte tail at `record + 256`.
 
-### C — relocated table (1 / 161: `Lance, head, small shields.chitubox`)
+## Header sizes seen
+
+| `field12` | Files | Notes |
+|-----------|-------|-------|
+| 412 | 159 | the common writer; `meshOffset` @424, delta @420 |
+| 420 | 1 | newer writer, header grew 8 bytes; `field16` = 412 records the old size |
+| 0 | 1 | no length field; table at a flat 412 (`Chapter_Master_Hammer.chitubox`) |
+
+`tableDelta` is **not** constant even at one header size: 444 in most files, 428
+in `Cisne origami.chitubox`. Both are authored values, correctly read from
+`field12 + 8`.
+
+## What actually broke on Lance
+
+`field12` = 420, so every pointer sat 8 bytes later than the parser assumed.
+Reading byte 424 returned `2013` — a different field entirely, not a corrupt
+`meshOffset`. That value passed a naive range check, so `meshOffset + 720`
+decoded as a 1.3-billion triangle byte count, `modelStart` became
+`-1280257320`, and the Z-offset scan read outside the DataView.
+
+The real `meshOffset` is at `420 + 12 = 432` and reads `831348`. Adding the
+authored delta at `420 + 8 = 428` (452) gives `831800`: the record table,
+exactly. Nothing about the file is unusual once the header length is honoured.
+
+## The support block is self-describing too
+
+Each instance's support pointer addresses a small block header, which carries
+the parametric record address at **`supPtr + 4`** and the record count at
+`supPtr + 0`:
 
 ```
-f12 = 420,  f16 = 412,  f20 = f8 + nInstances * 680   (table end)
-meshOffset present but NOT a table pointer
+u32 @ supPtr+4 lands on the 0xEA342389 TAG    181 / 181 blocks
+u32 @ supPtr+0 equals the TAG record count    180 / 181 blocks
 ```
 
-The distinguishing variant, and the one that crashed the parser. Differences
-from A, all of which had to be handled:
+The previously hardcoded `INLINE_PAD` of 436 is just what that pointer resolves
+to under a 412-byte header; it is 416 under a 420-byte one. Same class of
+mistake as the header offsets, one level down.
 
-1. **`meshOffset` is not a table pointer.** It read as `2013` while the table
-   sat at `831800`. `meshOffset` still passes a naive range check, so the value
-   at `meshOffset + 720` decoded as a 1.3-billion triangle byte count and drove
-   `modelStart` to `-1280257320` — the source of the DataView crash.
-2. **The table is far into the file.** 831800 is beyond both the ±128-byte
-   nearby-shift probe and the 64 KB absolute scan, so neither fallback found it.
-3. **Support block pad is 416, not 436.** The gap from an instance's support
-   pointer to its first `0xEA342389` TAG record.
-4. **`geoPtr` (TAG record + 40) is relative, not absolute.** `geoPtr - recBase`
-   goes negative, so the block extent computed as zero records.
+## Corrections to the earlier revision
 
-Points 3 and 4 each independently produce a *clean parse with zero supports* —
-silent data loss rather than an error.
+- **"Variant B — shifted table" does not exist.** `Cisne origami` authors a
+  delta of 428. There was no shift, only an unread field, which the +/-128
+  nearby probe had been silently absorbing.
+- **"Variant C" is not a dialect**, just a longer header.
+- **`meshOffset` was never unreliable.** It was read from the wrong address.
 
-### Not a variant — different format
+## Remaining unknowns
 
-`cube_export1_unsupported - Copy.chitubox` carries magic `0xAB231253`
-(one nibble different) and is rejected up front. Unrelated to the above.
-
-## Why the parser now keys on `f8`
-
-`f8` addresses a valid record table in **161 of 161 files**, including all three
-variants. `meshOffset + 444` is correct in 158. `f8` is therefore the primary
-pointer, with the `meshOffset + 444` probe kept as a fallback for any file where
-`f8` is zero or out of range.
-
-The support block is located by **seeking the TAG** rather than adding a fixed
-pad, and the block extent falls back to **counting the TAG run** when `geoPtr`
-cannot be a valid end marker. Both avoid keying on `f12`, so a fourth variant
-with yet another pad or pointer convention should still parse.
-
-## Caveats
-
-- Variants B and C rest on **one file each**. Broad corpus coverage shows the
-  common case is not regressed; it does not prove these paths generalise.
-- `f12` correlates perfectly with the pad (412 → 436, 420 → 416) across this
-  corpus, but the parser deliberately does not rely on that.
-- `Cisne origami.chitubox` parses to zero supports on both the old and new
-  parser. Whether it is genuinely unsupported or a further variant is unresolved.
+- `Chapter_Master_Hammer.chitubox` has `field12 = 0` and an unusable
+  `meshOffset`; its table sits at a flat 412 and is found via `field8`. Probably
+  predates the length field. One specimen.
+- The 420-byte header rests on **one file**. Broad coverage shows the common
+  path is not regressed; it does not prove this path generalises.
+- `Cisne origami.chitubox` parses to zero supports on every build tested. Not
+  investigated — it may genuinely have none.
+- One support block's count field disagrees with its TAG run; the parser counts
+  the run, so this is not load-bearing.
 
 ## Reproducing
 
@@ -100,4 +100,6 @@ with yet another pad or pointer convention should still parse.
 npx tsx scanCorpus.ts [--quiet] <dir> [dir...]
 ```
 
-Exits non-zero if any file fails to parse.
+Exits non-zero if any file fails to parse. Current status: 161/161 parse, and
+still 161/161 with the `field8` fast path disabled, confirming the header
+arithmetic stands on its own.
