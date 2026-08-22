@@ -142,11 +142,6 @@ function readRecord(view: DataView, base: number): RawRecord {
   };
 }
 
-/** Find the first TAG_EA byte sequence in [from, to). Returns -1 if absent. */
-function findFirstTag(bytes: Uint8Array, from: number, to: number): number {
-  return indexOfU32(bytes, TAG_EA, from, to);
-}
-
 /** Search for a little-endian uint32 value in bytes within [from, to). */
 function indexOfU32(bytes: Uint8Array, value: number, from: number, to?: number): number {
   const b0 = value & 0xff;
@@ -912,53 +907,15 @@ export class CbxParser {
       );
     }
 
-    // Primary model tri count lives at mesh_offset + 720. It marks where
-    // geometry begins, bounding the support-record and Z-offset scans below.
-    // A meshOffset that passes the range check above can still be a non-header
-    // field in an unfamiliar layout, in which case this reads as a nonsense
-    // triangle count. Anything that cannot describe a real span inside the file
-    // is discarded, and the derived start is clamped: an unclamped negative
-    // modelStart makes the scans below read outside the DataView and throw.
+    // Primary model tri count at meshOffset + 720, used only for the degenerate
+    // fallback header below. A meshOffset that passes the range check above can
+    // still be a non-header field in an unfamiliar layout, in which case this
+    // reads as a nonsense triangle count, so implausible values are discarded.
     const rawModelBytes0 = meshOffsetUsable ? u32(view, meshOffset + 720) : 0;
     const modelBytes0 = rawModelBytes0 > 0 && rawModelBytes0 <= len && rawModelBytes0 % 36 === 0
       ? rawModelBytes0
       : 0;
-    if (rawModelBytes0 > 0 && modelBytes0 === 0) {
-      console.warn(
-        `${LOG_PREFIX} implausible model byte count (${rawModelBytes0}) at meshOffset+720 `
-        + `for a ${len}-byte file; ignoring it and scanning from the record table instead.`,
-      );
-    }
-    let modelStart = modelBytes0 > 0
-      ? len - Math.floor(modelBytes0 / 36) * 36
-      : len;
-    modelStart = Math.max(0, Math.min(modelStart, len));
 
-    // Without meshOffset that shortcut is unavailable and modelStart is left at
-    // EOF, which would let the scans run over the geometry and read a mesh
-    // vertex as the plate Z. Derive the boundary from the record table instead.
-    if (!meshOffsetUsable || modelBytes0 === 0) {
-      const earliest = earliestGeometryStart(view, len, nInstances, tablePtr);
-      if (earliest !== null && earliest < modelStart) {
-        modelStart = earliest;
-      }
-    }
-
-    // Locate first TAG; absence means a no-support file.
-    const tagScanStart = meshOffsetUsable ? meshOffset + 720 : 0;
-    const firstTag = findFirstTag(bytes, tagScanStart, modelStart);
-    const hasSupports = firstTag !== -1;
-
-    // Z offset: most-negative plausible float in the post-header scan region.
-    const scanStart = hasSupports ? firstTag : modelStart;
-    let minZ = 0.0;
-    for (let i = Math.max(0, scanStart); i < len - 3; i += 4) {
-      const fv = f32(view, i);
-      if (!Number.isNaN(fv) && fv > -500.0 && fv < 0.0 && fv < minZ) {
-        minZ = fv;
-      }
-    }
-    const zOff = -minZ;
 
     // ---- Per-instance record table (authored ground truth) ----------------
     //
@@ -1080,6 +1037,56 @@ export class CbxParser {
     };
 
     const REC_BASE = findRecordBase(); // first record (filename) start
+
+    // Z offset: the raft sits at the most-negative authored Z, and the scene is
+    // lifted by that much so the plate lands at zero.
+    //
+    // This reads topZ/botZ out of the parametric records rather than sweeping
+    // raw floats. The old sweep ran from the first TAG to EOF, which assumed
+    // support blocks precede geometry; where they follow it the window instead
+    // covered the record table, and a plate X of -64.671 was read as a Z. Only
+    // a multi-model plate spread wide enough to author a large negative plate
+    // coordinate exposes it, which is why single-model files never showed it.
+    let minZ = 0.0;
+    let sawSupportRecord = false;
+    for (let k = 0; k < nInstances; k++) {
+      const tail = REC_BASE + k * STRIDE + TAIL;
+      if (tail + 28 > len) break;
+      const supPtr = u32(view, tail + 12);
+      if (supPtr === NO_SUPPORT || supPtr === 0) continue;
+      const blockBase = resolveSupportBlock(view, len, supPtr);
+      if (blockBase === null) continue;
+      let rb = blockBase;
+      for (; rb + REC_SIZE <= len && u32(view, rb) === TAG_EA; rb += REC_SIZE) {
+        const sub = u32(view, rb + 4);
+        if (sub === SUMMARY_SUB) continue; // sentinel Z values, not geometry
+        sawSupportRecord = true;
+        const topZ = f32(view, rb + 16);
+        const botZ = f32(view, rb + 28);
+        for (const z of [topZ, botZ]) {
+          if (!Number.isNaN(z) && z > -500.0 && z < minZ) minZ = z;
+        }
+      }
+
+      // The records describe pillars and pads, but the raft they stand on is
+      // only present as baked triangles, so the lowest authored record sits one
+      // pad-thickness above the plate. Chitubox writes that mesh between the
+      // records and the geometry (or after the geometry in the later layout);
+      // scan whichever side is present for the true floor.
+      const geoStart = u32(view, tail + 16);
+      const geoEnd = geoStart + u32(view, tail + 20);
+      const bakedStart = rb;
+      const bakedEnd = geoStart > bakedStart ? geoStart : geoEnd;
+      if (bakedEnd > bakedStart && bakedEnd <= len) {
+        for (let i = bakedStart + 8; i + 4 <= bakedEnd; i += 12) {
+          const z = f32(view, i);
+          if (!Number.isNaN(z) && z > -500.0 && z < minZ) minZ = z;
+        }
+      }
+    }
+    const hasSupports = sawSupportRecord;
+    const zOff = -minZ;
+
 
 
     interface InstanceHeader {
