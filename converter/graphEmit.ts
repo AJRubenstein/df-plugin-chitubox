@@ -69,10 +69,6 @@ const FOOT_GAP_MIN_MM = 0.05;
  * -- DF generates its own raft -- so a support that stood on one is left ending
  * in mid-air above DF's plate.
  *
- * Measured on guns.chitubox, the gaps are authored standoffs rather than noise:
- * they cluster at 1.20, 2.50 and 2.80mm, with a maximum of 6.97mm. 8mm covers
- * every one while staying far below the shortest genuine mid-air pillar, which
- * is held aloft by braces rather than hovering just over the plate.
  */
 const PLATE_REACH_MAX_MM = 8.0;
 
@@ -128,8 +124,8 @@ interface VerticalRun {
  * Glue the vertical sub-3 edges back into whole pillars.
  *
  * The graph splits a shaft at every T-junction, so one authored pillar arrives
- * as several collinear edges — 149 edges over 79 pillars on NOSFERATU. Union-find
- * over the vertical edges reassembles them.
+ * as several collinear edges. Union-find over the vertical edges reassembles
+ * them.
  */
 function verticalRuns(graph: SupportGraph): VerticalRun[] {
   const parent = new Int32Array(graph.nodes.length);
@@ -419,7 +415,7 @@ export function emitFromGraph(
   // --- Pillars ---
   //
   // A run with no tip and no brace touching it is an interior strut that neither
-  // reaches the model nor anchors anything. The chain builder drops those too.
+  // reaches the model nor anchors anything.
   const braceTouchesRun = (run: VerticalRun): boolean => {
     for (const nodeId of run.nodes) {
       for (const ei of graph.nodes[nodeId].edges) {

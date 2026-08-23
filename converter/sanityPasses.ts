@@ -27,9 +27,8 @@ const PILLAR_NEAR_MM = 2.0;    // contact within this of another pillar = a brac
 // in the tight gap between a shaft and the model surface), the pillar must be at least
 // this much closer than the model surface for the tip to be treated as a support-to-
 // support brace rather than a model contact. This resolves the ambiguity in Chitubox's
-// favour (it authored the tip onto the shaft) without flipping genuine model tips,
-// which sit ON the surface (dSurface ≈ 0) and so can never clear this margin. Measured
-// gap on the halfling cross-braces is ~0.6–0.7 mm; 0.5 keeps a safety buffer.
+// favour without flipping genuine model tips, which sit ON the surface and so
+// can never clear this margin.
 const BRACE_PRIORITY_MARGIN_MM = 0.5;
 
 // Cast in many directions so steeply-angled model faces are still detected; the
@@ -101,15 +100,11 @@ export function classifySupportTips(
     const pillar = distanceToNearestOtherPillar(allSupports, support, tip.x, tip.y, tip.contactZ);
     const pillarNear = pillar !== null && pillar.dist <= PILLAR_NEAR_MM;
 
-    // A tip can be near BOTH the model and a neighbouring shaft. Chitubox authors
-    // makeshift cross-braces by landing a tip on another support's shaft, and those
-    // landing points often sit only ~1 mm from the model too. The old order ("model
-    // wins if dSurface ≤ 2") then built such a brace as a full model support that
-    // overshoots its true (shaft) contact and runs on to a model-touching tip — the
-    // support comes out too long. So when the pillar is the meaningfully closer
-    // attachment, classify the tip as a brace even if it is also within the surface
-    // band. Genuine model tips sit on the surface (dSurface ≈ 0) and never clear the
-    // margin, so they are unaffected.
+    // A tip can be near BOTH the model and a neighbouring shaft: Chitubox
+    // authors cross-braces by landing a tip on another support, often close to
+    // the model as well. Where the pillar is meaningfully closer, treat it as a
+    // brace even inside the surface band. Genuine model tips sit on the surface
+    // and never clear the margin.
     if (pillarNear && pillar.dist < dSurface - BRACE_PRIORITY_MARGIN_MM) {
       braceTips.push({ tip, targetPillarX: pillar.pillarX, targetPillarY: pillar.pillarY });
       continue;
@@ -167,30 +162,21 @@ export interface KnotCenteringResult {
 }
 
 /**
- * Resolve clusters of near-coincident knots on the same shaft down to a single
- * shared knot. Chitubox frequently lands several braces at almost the same height
- * on one shaft, each authoring its own knot a fraction of a millimetre apart; left
- * as separate knots, the host renders a little fan of overlapping attach points
- * (each with its own independently-tracked diameter, so they can drift out of sync
- * on a later diameter edit) instead of the single clean attachment Chitubox shows.
- *
- * The host's data model already supports many entities (braces, branches, leaves)
- * referencing one shared Knot.id, so the fix is a real merge: every brace-only
- * knot in a cluster collapses onto one survivor, which the caller re-points all
- * matching Brace.startKnotId/endKnotId references onto.
+ * Merge clusters of near-coincident knots on one shaft into a single shared knot.
+ * Chitubox lands several braces at almost the same height, each authoring its own
+ * knot a fraction of a millimetre apart, which renders as a fan of overlapping
+ * attach points.
  *
  * Rules, deliberately conservative:
- *  - Only BRACE-only knots are merged. A knot that anchors a leaf or branch (a real
- *    model contact) is never moved or merged away — moving it could drag a tip off
- *    the model — but it MAY serve as the anchor the brace-only knots snap onto.
- *  - Clustering is by parentShaftId + parametric t (matching the host's own
- *    coincidence test), not 3D distance, so knots on a short/near-horizontal shaft
- *    that are far apart along it are not wrongly merged.
- *  - The shared spot is the contact knot's position if the cluster has one, else
- *    the mean of the brace members — so braces gather onto the real support where
- *    one exists.
- *  - The survivor is the lowest-t brace-only member of the cluster (deterministic);
- *    the rest are removed from `knots` and mapped onto it in `idRemap`.
+ *  - Only BRACE-only knots merge. A knot anchoring a leaf or branch is never
+ *    moved -- that could drag a tip off the model -- but may be the anchor others
+ *    snap onto.
+ *  - Clustering is by parentShaftId and t, matching the host's own coincidence
+ *    test, so knots far apart along a near-horizontal shaft are not merged.
+ *  - The shared spot is the contact knot's position where the cluster has one,
+ *    otherwise the mean of the brace members.
+ *  - The survivor is the lowest-t brace-only member; the rest are removed and
+ *    mapped onto it in `idRemap` for the caller to re-point.
  */
 export function centerCoincidentKnots(input: KnotCenteringInput): KnotCenteringResult {
   const { knots, braceKnotIds, contactKnotIds } = input;
@@ -328,23 +314,17 @@ function jointDist(a: CollapsibleJoint, b: CollapsibleJoint): number {
 }
 
 /**
- * Collapse degenerate (near-zero-length) shaft segments so a trunk/branch top
- * doesn't render a lump of overlapping joint spheres. Chitubox imports frequently
- * leave a knee joint, a diameter-profile split joint, and the socket joint crammed
- * into a sub-millimetre span at the trunk top (where a branch knot sits right below
- * the cone). Each is a separate sphere, so the user sees several joints piled in one
- * place — the "joint right next to the existing one" artefact.
+ * Collapse near-zero-length shaft segments so a trunk top doesn't render a lump
+ * of overlapping joint spheres. Imports often leave a knee joint, a
+ * diameter-split joint and the socket joint crammed into a sub-millimetre span.
  *
- * The collapse is purely structural and NEVER moves anything that holds the model:
- *  - The joint referenced by the contact cone (socketJointId) is the keeper — its
- *    position and id are preserved, so the cone/tip stay exactly where they were.
- *  - Otherwise the UPPER joint (toward the cone) is kept, so we only ever drop the
- *    lower, redundant joint and shorten the routing below it. Tip contacts, which
- *    live on the cone above the socket, are untouched.
- *  - Knots whose parentShaftId is a removed segment are re-pointed to the surviving
- *    segment with t clamped to the merge point, so brace/branch/leaf linkage holds.
+ * Structural only -- nothing holding the model moves:
+ *  - The cone's socket joint is the keeper, so the tip stays put.
+ *  - Otherwise the upper joint is kept and the lower, redundant one dropped.
+ *  - Knots on a removed segment are re-pointed to the survivor with t clamped,
+ *    so brace/branch/leaf linkage holds.
  *
- * Returns the number of stub segments removed (for debug logging).
+ * Returns the number of stub segments removed.
  */
 export function collapseDegenerateJoints(input: JointCollapseInput): number {
   const { trunks, branches, knots } = input;

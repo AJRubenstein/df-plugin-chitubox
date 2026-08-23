@@ -8,24 +8,17 @@ import { calculateDiskThickness } from '@/supports/SupportPrimitives/ContactDisk
 import { CbxContactInput } from './types';
 
 /**
- * Builds a contact-cone + socket-joint pair for a converted CBX support endpoint.
+ * Builds a contact-cone and socket-joint pair for a converted support endpoint,
+ * mapping the authored contact onto a native DragonFruit cone rather than
+ * replicating Chitubox's own tip geometry.
  *
- * This mirrors the proven LYS importer contract (df-plugin-lys), which maps an
- * external slicer's contacts onto NATIVE DragonFruit contact cones rather than
- * replicating the slicer's own tip geometry. The key idea (from the DF author):
+ *   - `normal` (the cone axis) keeps the authored approach angle, socket -> tip.
+ *   - `surfaceNormal` is the true model normal from a mesh raycast; the contact
+ *     disk seats perpendicular to it.
+ *   - The socket joint absorbs the angle between the two.
  *
- *   - The cone `normal` (cone axis / shaft direction) keeps the authored APPROACH
- *     angle — the direction the support arrives from (socket → tip).
- *   - The cone `surfaceNormal` is the TRUE model surface normal, recovered by
- *     raycasting the mesh. The contact DISK seats perpendicular to this.
- *   - The disk's socket joint absorbs the angular difference between the two.
- *
- * This is the same split the native twigBuilder/leaf use, so the result registers
- * as a proper, editable DF support — not abnormal geometry the editor can't handle.
- *
- * CBX does NOT author a tip normal, so `preferAuthoredNormal` is effectively unused
- * here; the cone axis is solved geometrically from startPos → tip, and the surface
- * normal comes from the mesh raycast (falling back to the cone axis on a miss).
+ * Cbx authors no tip normal, so the axis is solved geometrically and the surface
+ * normal falls back to the axis on a raycast miss.
  */
 export function createContactAssembly(
   s: CbxContactInput,

@@ -23,41 +23,25 @@ import { createContactAssembly } from './converter/contactAssembly';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
- * Converts parsed Cbx supports (CHAIN model) into DragonFruit's import
- * format. Each parsed support is a vertical chain — [base pad] → pillar → knot →
- * one-or-more tips — which maps onto DragonFruit anatomy as:
+ * Converts parsed Cbx supports into DragonFruit's import format. Each support is
+ * a vertical chain -- [base pad] -> pillar -> knot -> one or more tips -- mapping
+ * onto DragonFruit anatomy as:
  *
- *     Roots (from base pad if present, else settings-sized; on the plate)
- *       → Trunk
- *           → segment 0: root → knot joint   (bottomJoint undefined = "on Root")
- *           → segment 1: knot joint → primary tip's socket joint
- *           → contactCone (primary/tallest tip, built by createContactAssembly)
- *     + per EXTRA tip: a Knot on the shaft + a Branch with its own contactCone
+ *     Roots -> Trunk
+ *       -> segment 0: root -> knot joint   (bottomJoint undefined = "on Root")
+ *       -> segment 1: knot joint -> primary tip's socket joint
+ *       -> contactCone (tallest tip)
+ *     + per EXTRA tip: a Knot on the shaft and a Branch with its own cone
  *
- * Cone + socket construction is delegated to createContactAssembly — the SAME
- * helper convertLysData uses — so cone profile, socket placement, and disk
- * offset match the rest of the app. It is fed a synthesized `tipSettings`
- * carrying the AUTHORED tip diameters and length, routed through its geometric
- * path (Cbx stores no per-support contact normal; the model mesh, if
- * supplied, lets the helper raycast the true surface normal).
+ * Cone and socket construction is delegated to createContactAssembly so profiles
+ * and disk offsets match the rest of the app. It is fed the authored tip
+ * diameters and length; passing the authored length matters, since a
+ * default-length cone pushes the socket below the plate on short supports.
  *
- * Authored anatomy used (all verified against real data, see
- * chitubox-plugin-findings.md):
- *   pillar (sub-3): authored shaft diameter (paramA×2), top = knot center.
- *   knot   (sub-9): Joint at authored center Z, authored sphere diameter.
- *   tip    (sub-1): contactDiameter (small, on the model) = paramA×2;
- *                   bodyDiameter (larger socket) = paramB×2;
- *                   authored cone length = contactZ − attachZ (passed as
- *                   tipSettings.length — critical: prevents a default-length
- *                   cone from pushing the socket below the plate on short supports).
- *   base   (sub-4): Roots cone, bottom radius on the plate.
- *
- * Placement: the parser returns world-frame Z. This converter RAFT-NORMALIZES —
- * it subtracts the raft top (min pillar/base bottom across the model) so support
- * bases land on DragonFruit's plate at z = 0 and DF applies its own raft. modelId
- * is a placeholder; the host reassigns it via reassignModelId() after conversion.
+ * The parser returns world-frame Z. This converter raft-normalises, subtracting
+ * the raft top so bases land on DragonFruit's plate at z = 0 and DF applies its
+ * own raft. modelId is a placeholder the host reassigns after conversion.
  */
-
 // Shared CBX types, constants, and the debug helper now live in converter/types.
 // Re-exported here so existing importers of CbxConverter keep working unchanged.
 import {
@@ -132,17 +116,6 @@ interface BuiltSupport {
 }
 
 /**
- * Convert one parsed chain support into DragonFruit entities using AUTHORED
- * anatomy. `raftZ` is subtracted from all Z values so the support base lands on
- * DragonFruit's plate (z = 0) and DF applies its own raft.
- *
- *   base pad (sub-4)  → Roots (authored radii/heights when present)
- *   pillar (sub-3)    → Trunk shaft segment, authored diameter
- *   knot (sub-9)      → Joint at authored center Z, authored diameter
- *   primary tip       → trunk terminal cone (authored length)
- *   extra tips        → Knot on the shaft + Branch with its own cone
- */
-/**
  * Build a Stick: a model-to-model support whose body spans between two contact
  * points on the model, rather than rising from the plate.
  *
@@ -166,8 +139,7 @@ function buildStick(
   const z = (worldZ: number) => worldZ - raftZ;
   const shaftDiameter = s.pillarDiameter;
 
-  // Built to the SAME contract as the LYS importer's stick path
-  // (convertLysData Phase 4B), which is the working reference for this shape:
+  // Stick shape:
   //
   //   coneA = createContactAssembly(s, contactA, /* hint */ contactB, ...)
   //   coneB = createContactAssembly(s, contactB, /* hint */ contactA, ...)
@@ -238,8 +210,7 @@ function buildStick(
         id: uuidv4(),
         type: 'straight',
         diameter: shaftDiameter,
-        // A is the bottom cone, B the top -- same order as the host's
-        // stickBuilder and the LYS importer.
+        // A is the bottom cone, B the top, matching the host's stickBuilder.
         bottomJoint: jointA,
         topJoint: jointB,
       },
@@ -255,11 +226,8 @@ function buildStick(
   const branches: Branch[] = [];
   const leaves: Leaf[] = [];
 
-  // ONE KNOT PER LEAF, matching how the host places them by hand: a new knot is
-  // generated at the attach point as each leaf tip is placed. The LYS importer
-  // does the same (convertLysData: a fresh Knot per leaf, never a shared hub).
-  // A single shared knot renders only one leaf attached and leaves the rest
-  // visually detached.
+  // ONE KNOT PER LEAF, matching how the host places them by hand. A single
+  // shared knot renders only one leaf attached and the rest visually detached.
   //
   // `t` is the normalised position along the host segment. The host's
   // normalization derives a knot's position from parentShaftId + t, so omitting
@@ -439,11 +407,9 @@ function buildSupport(
   const leaves: Leaf[] = [];
 
   // --- Trunk for the PRIMARY tip (same for single- and multi-tip supports). ---
-  // LYS-style trunk: root → joint0 (knee) → socket → contact cone. For multi-tip
-  // supports the extra tips become native Branches off a knot on this trunk's shaft
-  // (built below), each growing up to its own contact — the arrangement DF produces
-  // when you place additional supports off a trunk. The trunk is always a normal,
-  // cone-terminated trunk so the engine recognises it as a properly-formed support.
+  // root -> joint0 (knee) -> socket -> contact cone. Extra tips become Branches
+  // off a knot on this shaft. The trunk is always cone-terminated so the engine
+  // recognises it as a properly-formed support.
   const provisionalKneeZ = Math.max(rootTopZ + 0.05, knotCenter);
   const provisionalKnee: Vec3 = { x: px, y: py, z: provisionalKneeZ };
   const primary = createContactAssembly(
@@ -491,19 +457,15 @@ function buildSupport(
   };
 
   // --- Extra tips → native Leaves or Branches off a knot on the trunk shaft. ---
-  // Use the LYS leaf-vs-branch decision per tip: shaftLength = dist(knot→contact) −
-  // tipLen. If ≤ 0.2mm there's no room for a shaft → Leaf (cone straight from the
-  // knot). Otherwise → Branch (single segment knot → socket + short native cone).
-  // All extra tips share one knot on the shaft (Chitu roots them at the pillar top).
+  // shaftLength = dist(knot -> contact) - tipLen. Too short for a shaft gives a
+  // Leaf, otherwise a Branch. All extra tips share one knot, as Chitubox roots
+  // them at the pillar top.
   const fanLeafIds = new Set<string>();
   if (extraTips.length > 0) {
     const topSegment = segments[segments.length - 1];
-    // Place the shared knot at the AUTHORED knot height (knotCenter) — the LYS
-    // "authored attach point" — not the primary cone's socket. Chitubox roots all
-    // tips of a multi-tip support at this shared height; using it lowers the knot to
-    // where the supports actually fan out, so leaves/branches approach their contacts
-    // from below (vertical) instead of meeting the shaft side-on at a right angle.
-    // Clamp to stay on the trunk's top segment (between its bottom joint and socket).
+    // Use the authored knot height, not the primary cone's socket: it is where
+    // the tips actually fan out, so they approach their contacts from below
+    // rather than meeting the shaft side-on. Clamped to the top segment.
     const segBotZ = topSegment.bottomJoint?.pos.z ?? rootTopZ;
     const segTopZ = topSegment.topJoint?.pos.z ?? primary.socketJoint.pos.z;
     const knotZ = Math.max(segBotZ + 0.05, Math.min(knotCenter, segTopZ - 0.05));
@@ -588,8 +550,7 @@ function resolveShaftDefaults(settings?: SupportSettings): typeof CBX_SHAFT_DEFA
 export class CbxConverter {
   /**
    * Converts one parsed Cbx model (geometry + supports) into DragonFruit's
-   * import format. Mirrors LysConverter.convert's role and output type so the
-   * file-type bridge can treat both identically.
+   * import format.
    *
    * @param model    Parsed model bundle (supports already in world space).
    * @param settings Active support settings; supplies tip/root/shaft defaults
@@ -862,18 +823,15 @@ export class CbxConverter {
 
     // A brace endpoint whose projection is CLAMPED to a segment end (t 0 or 1) and
     // still lands far from that end is a sign the host guess is poor: the authored
-    // point lies beyond the shaft entirely. LYS does not hit this because the .lys
-    // format names each endpoint's parent (parentBaseId / parentTipId), so its
-    // authored point is trustworthy; .chitubox has no such hint and this converter
-    // picks the nearest shaft, which can be the wrong one.
+    // point lies beyond the shaft entirely. .chitubox names no parent for a
+    // brace endpoint, so this converter picks the nearest shaft and can pick
+    // wrong.
     //
     // The host preserves an authored brace position when the projection is an
     // endpoint AND the reprojection distance exceeds this same threshold (see
-    // preserveAuthoredBracePos in supports/state.ts) -- a rule written for LYS,
-    // where the authored point is reliable. Left as 'braceImported' those knots
-    // render at a point with no shaft under it. Marking them 'project' instead
-    // takes the host's project fast path, so the knot is drawn on the shaft its
-    // t already refers to.
+    // preserveAuthoredBracePos in supports/state.ts). Left as 'braceImported'
+    // those knots render at a point with no shaft under it; marking them
+    // 'project' draws the knot on the shaft its t already refers to.
     const BRACE_ENDPOINT_PRESERVE_TOL_MM = 0.5;
     const braceProjectionIsUnreliable = (
       authored: Vec3,
@@ -939,9 +897,9 @@ export class CbxConverter {
       // Sanity: a rebuilt brace must stay close to its AUTHORED span. The knots
       // are projected onto their host shafts, so a mis-resolved tier shows up as a
       // rebuilt strut far longer than the record describes. Authored braces on
-      // these files are short 45deg struts (Supported_Chest_Back: max 6.28mm), so
-      // a large overshoot means the endpoint bound to the wrong pillar -- drop it
-      // rather than draw a girder across the model.
+      // Authored braces are short 45deg struts, so a large overshoot means the
+      // endpoint bound to the wrong pillar. Drop it rather than draw a girder
+      // across the model.
       const authoredLen = Math.hypot(
         endpointB.x - endpointA.x, endpointB.y - endpointA.y, endpointB.z - endpointA.z,
       );
@@ -1487,8 +1445,8 @@ export class CbxConverter {
         if (knotToContact <= tipLen + LEAF_MAX_SHAFT_MM) { keptLeaves.push(leaf); continue; }
 
         // Over-long: rebuild as a Branch. Re-solve a short native cone + socket from
-        // the knot toward the contact via createContactAssembly (the LYS contract),
-        // so the cone is a short tip near the contact and the shaft carries the rest.
+        // the knot toward the contact, so the cone is a short tip and the shaft
+        // carries the rest.
         const shaftDia = (cc.profile as any)?.bodyDiameterMm
           ? Math.max((cc.profile as any).bodyDiameterMm, 0.8)
           : 0.8;
@@ -1588,8 +1546,7 @@ export class CbxConverter {
       version: 1,
       meta: {
         source: model.filename ? `chitubox:${model.filename}` : 'chitubox_conversion',
-        // Match LYS parity: the host expects {0,0,0} here (LysConverter hardcodes
-        // it). The model mesh carries its own world position.
+        // The host expects {0,0,0}; the model mesh carries its own position.
         objectCenter: { x: 0, y: 0, z: 0 },
         updatedAt: Date.now(),
       },
@@ -1669,7 +1626,7 @@ export class CbxConverter {
 
   /**
    * Rewrites all converted entities to a single target model id. Called by the
-   * file-type bridge after conversion, matching LysConverter.reassignModelId.
+   * file-type bridge after conversion.
    *
    * EVERY top-level support entity is a SupportEntity (carries its own modelId),
    * so all of them must be reassigned — not just roots/trunks/branches. Missing
@@ -1705,7 +1662,7 @@ export class CbxConverter {
    * and places it from there — it does NOT honour a transform-Z we provide, and
    * it does not move the supports with the model. So to keep supports locked to
    * the model, the bridge shifts them by the model's bbox-center Z (see
-   * fileTypeHandlers). This is the CBX analogue of LYS's applySupportZOffset.
+   * fileTypeHandlers).
    *
    * Walks every Z-bearing field: Roots transform, Trunk/Branch segment joints,
    * contact-cone positions, and Knots. Joints shared across segments are shifted

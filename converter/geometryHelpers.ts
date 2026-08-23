@@ -1,8 +1,7 @@
 /**
  * CBX converter geometry helpers — the pure "given a knot and a contact, build a
- * primitive" functions, extracted from CbxConverter.ts to mirror the LYS plugin's
- * converter/helpers.ts split. These are stateless: they take geometry in and return
- * DragonFruit primitives, with no knowledge of the overall convert orchestration.
+ * primitive" functions. Stateless: geometry in, DragonFruit primitives out, with
+ * no knowledge of the convert orchestration.
  */
 import * as THREE from 'three';
 import { Vec3, Knot, Joint, Segment, Branch, Leaf, Trunk } from '@/supports/types';
@@ -19,11 +18,8 @@ export function normalizeVec(v: Vec3): Vec3 {
   return { x: v.x / len, y: v.y / len, z: v.z / len };
 }
 
-/**
- * Build a synthetic LysSupport-shaped object for createContactAssembly.
- * Cbx has no tip normal, so tipNormal is omitted; the helper then takes its
- * geometric socket-solve path (preferLysTipNormal=false).
- */
+/** Synthetic input for createContactAssembly. Cbx authors no tip normal, so the
+ *  helper takes its geometric socket-solve path. */
 export function synthSupportForTip(tip: CbxTip, attachPos: Vec3): any {
   return {
     id: 'chitubox-synth',
@@ -35,20 +31,15 @@ export function synthSupportForTip(tip: CbxTip, attachPos: Vec3): any {
 
 /**
  * tipSettings for createContactAssembly.
- *   length        ← authored cone length.
- *   pointDiameter ← AUTHORED contactDiameter (the model footprint). Never defaulted.
- *   diameter      ← the SHAFT diameter this tip grows from, not the authored Cbx
- *                   bodyDiameter (`pb`).
+ *   length        <- authored cone length.
+ *   pointDiameter <- authored contactDiameter, never defaulted.
+ *   diameter      <- the SHAFT diameter this tip grows from, not the authored
+ *                    body diameter.
  *
- * Cbx's "Connection" cone tapers from the contact (upper) to a lower/pillar
- * diameter (`pb`) that's often narrower than the shaft (e.g. a 0.80 shaft with a
- * 0.50 connection) — imported verbatim that reads as a fat joint ball necking down
- * to a thin spike, since the engine sizes the socket JOINT to the shaft diameter
- * (see applyTrunkDiameterProfile) independently of the cone's own body diameter.
- * Matching the native DF behaviour (editing shaft diameter syncs tip body diameter
- * to it, see updateShaftProfile) keeps the cone body flush with the shaft it grows
- * from, which is the look the host produces by default and what a settings-dialog
- * round-trip already converges imports to.
+ * Cbx tapers its connection cone to a diameter often narrower than the shaft.
+ * Imported verbatim that reads as a fat joint necking down to a thin spike,
+ * since the engine sizes the socket joint to the shaft regardless. Using the
+ * shaft diameter keeps the cone body flush with what it grows from.
  *
  * @param shaftMm  the shaft/pillar diameter this tip grows from.
  */
@@ -61,32 +52,19 @@ export function synthTipSettings(tip: CbxTip, shaftMm: number): any {
 }
 
 /**
- * Build a single tip hanging off a host knot as EITHER a native Leaf or a native
- * Branch, mirroring the LYS importer's decision:
+ * Build a tip hanging off a host knot as either a Leaf or a Branch:
  *
- *   shaftLength = distance(knot → contact) − nativeTipLength
- *   shaftLength <= LEAF_MAX_SHAFT_MM (0.2)  → Leaf  (cone reaches straight from knot)
- *   shaftLength >  LEAF_MAX_SHAFT_MM         → Branch (thin shaft + SHORT native cone)
+ *   shaftLength = distance(knot -> contact) - nativeTipLength
+ *   <= LEAF_MAX_SHAFT_MM  -> Leaf   (cone reaches straight from the knot)
+ *   >  LEAF_MAX_SHAFT_MM  -> Branch (thin shaft, short cone at the model)
  *
- * Why: Chitubox authors long tips (4–8mm) as a single cone from the knot to the
- * model. Imported verbatim that's one long, fat (body-diameter) cone swinging out
- * at a steep angle — it reads as a "twist" and overhangs the knot. The native DF
- * form is a thin shaft carrying most of the distance, capped by a SHORT contact
- * cone (the native ~2.5mm) at the model. That's slim along the shaft, seats cleanly
- * via the disk, and is what DF would build if the tip were hand-placed. Short tips
- * stay leaves (no shaft needed), which is correct for compact supports like HAND.
+ * Chitubox authors long tips as one cone from knot to model. Imported verbatim
+ * that is a long fat cone at a steep angle; a thin shaft capped by a short cone
+ * is what DF would build for the same tip.
  *
- * The contact cone is always aimed/length-solved from the knot to the FIXED model
- * contact via the host's recomputeLeafContactConeAxisAndLength, so the model-side
- * clearance is preserved and the cone won't "snap" on first edit.
- *
- * `forceLeaf` overrides the length test. A stick's hub carries an authored FAN of
- * long tips (CriosphinxHead: six, 7-8mm each) and the host builds exactly that
- * shape by hand -- its "Leaf Fanning" mode sprouts long leaves straight from a
- * shaft. Splitting them into branches there invents shafts Chitubox never
- * authored and detaches the fan from the hub, so hub tips stay leaves whatever
- * their length. The length test still governs trunk/branch tips, where a long
- * unsupported cone really would read as a twist.
+ * `forceLeaf` overrides the length test for a stick's hub, whose fan of long
+ * tips is authored as leaves off the shaft. Splitting those into branches
+ * invents shafts and detaches the fan from its hub.
  */
 export const LEAF_MAX_SHAFT_MM = 0.2;
 export function buildTipFromKnot(
@@ -180,18 +158,12 @@ export function buildTipFromKnot(
 }
 
 /**
- * Build a Branch off a parent knot EXACTLY the way the proven LYS importer does:
- * call createContactAssembly (the shared cone/socket solver) with the parent knot
- * as the start point and the model contact as the tip, then wrap its socketJoint +
- * contactCone in a single-segment branch. NO middle joint, NO custom cone-axis
- * blending, NO surface-normal raycast, NO socket clamp — createContactAssembly
- * already solves the socket placement and cone axis (and enforces socket-below-tip).
- * Our earlier hand-rolled geometry fought that solver and produced giant sideways
- * cones; deferring entirely to createContactAssembly (the LYS contract) fixes it.
+ * Build a Branch off a parent knot: call createContactAssembly with the knot as
+ * the start and the model contact as the tip, then wrap its socket joint and
+ * cone in a single-segment branch.
  *
- *   LYS: const { socketJoint, contactCone } = createContactAssembly(s, tip, knotPos, ...);
- *        const segment = { straight, diameter, bottomJoint: undefined, topJoint: socketJoint };
- *        const branch  = { parentKnotId: knot.id, segments: [segment], contactCone };
+ * No middle joint, cone-axis blending, normal raycast or socket clamp -- the
+ * solver already places the socket and axis. Hand-rolled geometry fights it.
  */
 export function buildNativeBranch(
   tip: CbxTip,
@@ -204,10 +176,9 @@ export function buildNativeBranch(
 ): Branch {
   const knotPos = parentKnot.pos;
 
-  // Native tip dimensions so the branch ends in a small DF tip (not the fat authored
-  // Chitubox body). createContactAssembly solves the socket + cone from the knot to
-  // the contact, with enforceSocketBelowTip=true so the socket sits below the tip and
-  // the branch shaft rises from the knot to it (single segment, exactly like LYS).
+  // Native tip dimensions, so the branch ends in a small DF tip rather than the
+  // fat authored body. enforceSocketBelowTip keeps the socket under the tip so
+  // the shaft rises from the knot to it.
   const tipSettings = {
     length: tipDefaults.lengthMm,
     diameter: tipDefaults.bodyDiameterMm,

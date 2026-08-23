@@ -4,35 +4,26 @@ import { buildSupportGraph } from './converter/supportGraph';
 import { emitFromGraph } from './converter/graphEmit';
 
 /**
- * Parser for `.chitubox` project files.
+ * Parser for `.chitubox` project files, scoped to what import needs: model mesh
+ * geometry per distinct model, and the parametric support records DragonFruit
+ * rebuilds into editable primitives.
  *
- * A faithful TypeScript port of the verified Python extractor (chitubox_extract
- * v15), scoped to what DragonFruit import needs:
- *   - model mesh geometry (per distinct model), and
- *   - parametric support records (tip / pillar / base), which DragonFruit
- *     rebuilds into editable support primitives.
+ * Support mesh triangles are deliberately not extracted, since support geometry
+ * is regenerated from the records to stay re-editable. Their extent is still
+ * located, because it bounds each block's geometry region.
  *
- * Support *mesh* triangles are intentionally NOT extracted: DragonFruit
- * regenerates support geometry from the parametric records so it stays
- * re-editable. The multi-model block→geo mapping is still computed (supports
- * must attach to the correct model), which requires locating each block's
- * support-geometry end as a boundary even though those triangles aren't kept.
- *
- * Format summary (see chitubox_format_report.md for the full spec):
+ * Format:
  *   - 4-byte LE magic 0xAB231243 at offset 0.
- *   - field4 (offset 4) = total model instance count (NOT a version).
- *   - Per-instance header blocks of 680 bytes start at mesh_offset + 720.
- *   - Parametric records are 72 bytes, tagged 0xEA342389, grouped 4-per-support,
- *     typed by a sub-index (1/3 tip, 9 pillar, 4/5 base, 2 model-header, 6 summary).
- *   - Model geometry is flat 36-byte float32 triangles (no normals/attributes).
+ *   - field4 (offset 4) = model instance count, not a version.
+ *   - Per-instance header blocks of 680 bytes.
+ *   - Support records are 72 bytes, tagged 0xEA342389, typed by a sub-index.
+ *   - Model geometry is flat 36-byte float32 triangles, no normals.
  */
 
 const MAGIC = 0xab231243;
 const TAG_EA = 0xea342389;
 const REC_SIZE = 72;
 
-// Corrected anatomy sub-index roles (verified against SPOTLIGHT.chitubox layer
-// scrub + chain-continuity analysis — see chitubox-plugin-findings.md).
 // A support is a VERTICAL CHAIN of parts, not a fixed group of 4 records:
 //   [base pad sub-4] → pillar sub-3 → knot sub-9 → one-or-more tips sub-1
 // stitched by the continuity rule (each part's botZ ≈ the part-below's topZ).
@@ -55,7 +46,7 @@ const INLINE_PAD = 436;
 // variant, seek the TAG: the pad is a fixed header whose size is the only thing
 // that moves, and a wrong guess silently drops every support on the instance.
 const INLINE_PAD_MAX = 512;
-const COORD_LIMIT = 500; // reject vertices outside ±500mm (matches Python guard)
+const COORD_LIMIT = 500; // reject vertices outside ±500mm
 // A sub-3 record whose two endpoints differ in XY by more than this is a brace
 // (diagonal shaft-to-shaft strut) rather than a vertical pillar. Vertical pillars
 // have identical endpoints (delta ~0); the smallest real braces span >1.5mm, so
@@ -218,9 +209,7 @@ export const cbxDebugBlocks: { capture: CbxBlockRef[] | null } = { capture: null
 /**
  * Decode every parametric record in one support block, in file order.
  *
- * Split out of `parseSupportBlock` so an alternative structure builder can be
- * measured against the chain builder on byte-identical input. The chain builder
- * calls this too, so the two can never drift apart.
+ * Shared by both structure builders, so they cannot drift apart on input.
  */
 export function decodeSupportBlockRecords(
   view: DataView,
@@ -263,9 +252,8 @@ export function decodeSupportBlockRecords(
       // No re-orientation is needed: the fields already follow the tip
       // convention. (x, y, topZ) is the narrow contact end -- here below the
       // socket, because this cone points DOWN onto the model -- and
-      // (x2, y2, botZ) is the wide socket, which lands exactly on the knot the
-      // branch hangs from. The chain builder matches a tip by its botZ, so it
-      // attaches correctly as-is.
+      // (x2, y2, botZ) is the wide socket, landing on the knot the branch
+      // hangs from.
       rec.sub = TIP_SUB;
     }
     // Shift Z into world frame up front so all continuity math is in one frame.
@@ -277,25 +265,9 @@ export function decodeSupportBlockRecords(
 }
 
 /**
- * Parse all supports from one model's record block using the CHAIN model.
- *
- * A support is a vertical chain: [base pad sub-4] → pillar sub-3 → knot sub-9 →
- * one-or-more tips sub-1. The number of supports equals the number of pillar
- * (sub-3) records. Parts are stitched by:
- *   - knot: shares pillar XY, knot center (topZ+botZ)/2 ≈ pillar topZ
- *   - base: shares pillar XY, base topZ ≈ pillar botZ
- *   - tips: tip botZ ≈ knot center; assigned to the nearest such support, with
- *     XY distance from the pillar as a tiebreak so branched tips (own contact XY)
- *     and closely-stacked supports don't steal each other's tips.
- *
- */
-/**
- * Graph-builder entry point, shaped exactly like parseSupportBlock so the two are
- * interchangeable at the call site.
- *
- * Anything the emitter cannot place is warned about rather than silently lost --
- * the chain builder's habit of dropping unmatched parts is what made its output
- * hard to trust.
+ * Graph-builder entry point, shaped like parseSupportBlock so the two are
+ * interchangeable at the call site. Anything the emitter cannot place is warned
+ * about rather than silently dropped.
  */
 function buildViaGraph(
   view: DataView,
@@ -458,14 +430,12 @@ function parseSupportBlock(
   // Assign each tip to the chain whose knot center matches its botZ; tiebreak by
   // XY distance from the pillar (handles branched tips + stacked supports).
   //
-  // The Z gate alone is NOT sufficient. On a large model many pillars share a knot
-  // height, so a tip could bind to a chain anywhere on the plate purely because the
-  // Z lined up -- Supported_Chest_Back had 5 tips matched to chains 52-59mm away in
-  // XY, which then rendered as giant leaves spanning the whole model.
+  // The Z gate alone is NOT sufficient: on a large model many pillars share a
+  // knot height, so a tip can bind to a chain anywhere on the plate purely
+  // because the Z lined up, rendering as a giant leaf across the model.
   //
-  // A tip's SOCKET sits on its own pillar: measured across that file the socket is
-  // 0.00mm from the nearest pillar at the median and 2.45mm at worst. Cap the match
-  // well above that (8mm) so genuine branched/offset tips still bind while a
+  // A tip's SOCKET sits on its own pillar, so cap the match on XY distance --
+  // far enough out that genuine branched or offset tips still bind while a
   // cross-model match cannot. Score on the SOCKET, not the contact: the contact end
   // legitimately reaches out to the model, the socket is the end that must sit on
   // the shaft.
@@ -678,9 +648,8 @@ function parseSupportBlock(
     if (footBottomFor(c.pillar.x, c.pillar.y) !== null) return false; // sits on a foot
     // Airborne with no pad and no foot: a branch, not a trunk. Converging braces
     // are the usual reason (a fork junction), but a pillar can also stand
-    // directly on the model surface with nothing feeding it -- CriosphinxHead
-    // has one starting 21mm up. Either way a grounded trunk would plant a root
-    // cup in mid-air, which the support model never allows.
+    // directly on the model surface with nothing feeding it. Either way a
+    // grounded trunk would plant a root cup in mid-air.
     return true;
   };
 
@@ -888,7 +857,7 @@ function earliestGeometryStart(
 /**
  * Read a flat 36-byte-triangle geometry region into a non-indexed position
  * array (THREE expects 3 verts × 3 floats per triangle). Applies the Z offset
- * and drops any triangle with a vertex outside ±COORD_LIMIT (matches Python).
+ * and drops any triangle with a vertex outside ±COORD_LIMIT.
  */
 function readGeometryToPositions(
   view: DataView,
@@ -994,10 +963,9 @@ export class CbxParser {
       );
     }
 
-    // Primary model tri count at meshOffset + 720, used only for the degenerate
-    // fallback header below. A meshOffset that passes the range check above can
-    // still be a non-header field in an unfamiliar layout, in which case this
-    // reads as a nonsense triangle count, so implausible values are discarded.
+    // Primary model tri count, used only by the degenerate fallback header
+    // below. A meshOffset that passes the range check can still be a non-header
+    // field, reading as a nonsense count, so implausible values are discarded.
     const rawModelBytes0 = meshOffsetUsable ? u32(view, meshOffset + 720) : 0;
     const modelBytes0 = rawModelBytes0 > 0 && rawModelBytes0 <= len && rawModelBytes0 % 36 === 0
       ? rawModelBytes0

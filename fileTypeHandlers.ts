@@ -10,22 +10,16 @@ import { initializeBVH, accelerateGeometry, disposeGeometryBVH } from '@/utils/b
 /**
  * File-type import bridge for `.chitubox` project files.
  *
- * Provides a non-React async import path used by the plugin file-type capability,
- * mirroring the LYS import bridge. Unlike LYS — which discovers scene objects and
- * assigns supports to owners heuristically at runtime — the Cbx parser already
- * returns geometry grouped per distinct model with its supports attached
- * (see CbxParser `models[]`, derived from the format report's block→geo mapping).
- * That makes this bridge simpler: iterate the parser's models, convert each.
+ * Non-React async import path used by the plugin file-type capability. The
+ * parser already returns geometry grouped per model with its supports attached,
+ * so this bridge just iterates those models and converts each.
  *
- * Placement/orientation policy (per format capability):
- *   - Plate XY position is now decoded from the per-instance header table
- *     (+660/+664) and applied: each model and its supports are translated onto
- *     their authored plate position, so multi-model imports spread across the
- *     plate instead of stacking at the origin.
- *   - Per-model rotation still lives in an undecoded region, so rotation is left
- *     identity. Inline geometry is already in print-plate orientation.
- *   - The decoded Z offset is applied so models/supports sit on the build plate
- *     (world Z = 0).
+ * Placement:
+ *   - Plate XY comes from the per-instance header table, so multi-model imports
+ *     spread across the plate rather than stacking at the origin.
+ *   - Rotation lives in an undecoded region and is left identity; inline
+ *     geometry is already in print-plate orientation.
+ *   - The decoded Z offset puts models and supports on the plate at world Z = 0.
  */
 
 // ---------------------------------------------------------------------------
@@ -34,8 +28,6 @@ import { initializeBVH, accelerateGeometry, disposeGeometryBVH } from '@/utils/b
 
 /**
  * Structured result from importing one model out of a `.chitubox` container.
- * Shape matches the LYS import payload so the host scene manager can consume
- * both via the same code path.
  */
 export type CbxImportPayload = {
   modelId: string;
@@ -124,7 +116,7 @@ function convertSingleModel(
   // Build a raycast mesh from the model geometry so createContactAssembly can
   // recover the true surface normal at each contact point (better cone seating
   // on angled faces). Double-sided basic material; matrix world updated; the
-  // material is disposed after conversion. Mirrors the LYS ghost-mesh approach.
+  // material is disposed after conversion.
   //
   // The converter raycasts heavily against this mesh (contact assembly, the
   // penetration self-check, twig surface-normal recovery, the support-to-support
@@ -177,29 +169,16 @@ function convertSingleModel(
   // raftZ is the support cluster's plate offset (0 when there are no supports).
   const raftZ = computeRaftZ(model.supports ?? []);
 
-  // Model lift. Chitubox stores the model's intended bottom height above the plate
-  // in the per-instance liftZ field: supported models get liftZ = raft gap (e.g.
-  // 5mm), and support-less models get liftZ = 0 (flat on the bed). The host centers
-  // the geometry's bbox at z=0 then applies this lift, so the model bottom lands at
-  // (modelLiftZ - halfHeight).
+  // Model lift. Supports are shifted by -raftZ to bring their lowest point to
+  // z = 0, so the model must shift by the same amount to stay locked to them:
   //
-  // The supports are shifted by -raftZ (their lowest point → plate z=0). To keep
-  // the model LOCKED to its supports, the model must shift by the SAME -raftZ, so
-  // its bottom lands at (rawBottom - raftZ) — the actual authored gap between the
-  // model bottom and the support roots:
+  //   modelLiftZ = (rawBottom - raftZ) + halfHeight
   //
-  //   modelLiftZ = (rawBottom - raftZ) + halfHeight   →   model bottom = rawBottom - raftZ
+  // The authored liftZ field is the nominal gap and only matches where raftZ is
+  // 0; where base pads raise the cluster it overstates the gap and the model
+  // floats above its tips.
   //
-  // The earlier form used the nominal liftZ field instead, which only equals the
-  // real gap when raftZ == 0 (the lowest support already sits at the plate). When
-  // the support cluster's lowest point is authored above the plate (raftZ > 0, e.g.
-  // base pads/feet raise it), liftZ overstates the gap and the model floats ~1mm
-  // above the tips, so every tip falls short by exactly liftZ - (rawBottom - raftZ).
-  // Using (rawBottom - raftZ) is a no-op where raftZ == 0 (e.g. BIG_GAT) and closes
-  // the gap everywhere else (e.g. SPOTLIGHT, the halfling).
-  //
-  // SUPPORT-LESS models have no roots to lock to, so there's no authored gap to
-  // follow; fall back to liftZ (0 → flat on the bed), matching Chitubox.
+  // Support-less models have no roots to lock to, so they fall back to liftZ.
   const liftZ = model.transform?.liftZ ?? 0;
   const hasSupports = (model.supports?.length ?? 0) > 0;
   let halfHeight = 0;
@@ -263,8 +242,8 @@ function convertSingleModel(
 /**
  * Build a display name for an imported model from its container filename.
  * Strips a trailing 3D-model extension (.stl/.obj/.ply/.3mf) so the host shows
- * "Turret_Ammo_Hollowed" rather than "Turret_Ammo_Hollowed.stl". Falls back to
- * an indexed generic name when the container has no filename for this instance.
+ * the bare model name rather than one ending in .stl. Falls back to an indexed
+ * generic name when the container has no filename for this instance.
  */
 function deriveModelName(filename: string | null | undefined, index: number): string {
   const raw = (filename ?? '').trim();

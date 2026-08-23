@@ -3,20 +3,14 @@ import type { ComplexPluginDefinition } from '@/features/plugins/complexPluginCo
 /**
  * Built-in plugin descriptor for DragonFruit's Chitubox project-file import capability.
  *
- * Mirrors the LYS import plugin's descriptor shape (ComplexPluginDefinition):
- * - File-type focused (no runtime protocol / encoder / network surface).
- * - The import warning sets compatibility expectations before import, since
- *   support topology may differ slightly from the authoring app after conversion.
+ * File-type only: no runtime protocol, encoder or network surface. The import
+ * warning sets expectations up front, since support topology may differ
+ * slightly from the authoring app after conversion.
  *
- * Format notes (see chitubox_format_report.md for the full spec):
- * - `.chitubox` is a proprietary little-endian binary project file.
- * - Model geometry is stored as compact float32 triangles; supports are
- *   parametric records. Only the support-settings UI header is undecoded and is
- *   not required for import.
- * - Plate XY position is decoded from the per-instance header table and applied
- *   at import; per-model rotation remains undecoded, so models import at their
- *   authored plate position with identity rotation. The support-settings UI
- *   header is undecoded and not required for import.
+ * `.chitubox` is a little-endian binary project file storing model geometry as
+ * float32 triangles and supports as parametric records. Plate XY is decoded and
+ * applied at import; per-model rotation and the support-settings UI header
+ * remain undecoded and are not required.
  */
 const PLUGIN_DEFINITION: ComplexPluginDefinition = {
   id: 'chitubox-import',

@@ -65,10 +65,8 @@ export function applyZShift(data: DragonfruitImportFormat, deltaZ: number): void
     if (twig.contactDiskA?.pos) twig.contactDiskA.pos.z += deltaZ;
     if (twig.contactDiskB?.pos) twig.contactDiskB.pos.z += deltaZ;
   }
-  // Sticks were MISSING from this walk. Their segments/cones stayed in the
-  // authored frame while their leaves and hub knots were shifted with everyone
-  // else, so the body separated from its own fan by exactly deltaZ -- the
-  // "renders as two separate supports" bug.
+
+
   for (const stick of data.sticks ?? []) {
     shiftSegments(stick.segments);
     shiftCone(stick.contactConeA);
@@ -169,15 +167,8 @@ export function applyXYShift(data: DragonfruitImportFormat, deltaX: number, delt
 /**
  * Pin every Roots base to the build plate (z = `plateZ`, default 0), leaving
  * the rest of each support (shaft joints, knots, contact cones) untouched.
- *
- * Why: DragonFruit treats a support's ROOT as anchored in plate space and its
- * contact cone as anchored to the model surface — the shaft between them is
- * solved/stretched by the host. After applyZShift puts the whole support in
- * the host's centered-model frame (so cones meet the model), the roots end up
- * below the plate. This re-seats just the roots on the plate; the first shaft
- * segment has `bottomJoint: undefined` (= "connects to Root"), so the host
- * re-solves the shaft from the plate up to the first joint automatically — the
- * visual result is a support standing on the plate and reaching up to the model.
+ * Really just a hacky way to reseat supports that are stuck to thick rafts
+ * in a native Chitubox file.
  */
 export function seatRootsOnPlate(data: DragonfruitImportFormat, plateZ = 0): void {
   for (const root of data.roots) {

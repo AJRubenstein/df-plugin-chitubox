@@ -7,16 +7,13 @@ import { CbxConverter, CbxModelInput } from './CbxConverter';
 /**
  * Scene preview overlay for `.chitubox` imports.
  *
- * Mirrors the LYS GhostOverlay: renders a lightweight wireframe of the converted
- * support structure (root markers, shaft segments, joints, contact-cone tips) so
- * the user can confirm placement before/while importing.
+ * Renders a lightweight wireframe of the converted support structure -- root
+ * markers, shaft segments, joints, contact-cone tips -- so placement can be
+ * confirmed before importing.
  *
- * Difference from the LYS overlay: the LYS converter accepts the raw scene blob,
- * so its overlay calls `LysConverter.convert(rawData, ...)` inline. The Cbx
- * converter consumes a PARSED model (`CbxModelInput`) produced by the binary
- * parser, not a raw file. To keep the same host-facing `{ data, visible }` prop
- * contract while accommodating that, this overlay accepts `data` in any of three
- * shapes and normalizes to a `DragonfruitImportFormat` for rendering:
+ * The converter consumes a parsed model rather than a raw file, so to keep the
+ * host-facing `{ data, visible }` prop contract this overlay accepts `data` in
+ * any of three shapes and normalizes to a `DragonfruitImportFormat`:
  *   - an already-converted `DragonfruitImportFormat` (has `.trunks`)
  *   - a single parsed `CbxModelInput` (has `.supports`)
  *   - an array of parsed models
