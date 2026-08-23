@@ -82,10 +82,7 @@ const LOG_PREFIX = '[CbxParser]';
  * the top-down chain builder.
  *
  * The graph derives structure geometrically -- endpoint coincidence, T-junction
- * splits, anchor proximity -- rather than walking pillars from the top. On
- * NOSFERATU it reproduces the chain builder to 79/80 supports, 109/109 tips and
- * 112/111 braces; across the 161-file corpus it places 99.6% of contacts and
- * reports every unplaced one instead of dropping it.
+ * splits, anchor proximity -- rather than walking pillars from the top. 
  *
  * Set CBX_CHAIN_BUILDER=1 to fall back to the chain builder. Both paths stay
  * live so the two can be compared on the same file.
@@ -1032,16 +1029,7 @@ export class CbxParser {
     //   filename @ meshOffset + 444 + k*680
     //   tail     @ meshOffset + 700 + k*680   (= filename + 256)
     //
-    // Verified field-by-field against guns.chitubox (11 records) and
-    // SPOTLIGHT.chitubox (1 record): support pointers land exactly on each model's
-    // own parametric block (tip counts match the authoring app), and geometry
-    // spans match the exported OBJ/STL bounding boxes triangle-for-triangle.
-    //
-    // NOTE: an earlier revision read these fields 20 bytes too high (relative to
-    // meshOffset+720). That single shift produced every prior symptom — wrong
-    // plate placement, support mis-ownership, a phantom "embedded block", and
-    // corrupted OBJ geometry. The offsets above are correct; no special-casing of
-    // anomalous entries, embedded blocks, or duplicate inference is needed.
+
 
     const TAIL = 256; // tail offset within a record
     const STRIDE = 680;

@@ -1,17 +1,17 @@
 /**
  * Per-support comparison: chain builder vs graph builder, on one file.
  *
- *   npx tsx compareGraph.ts <file.chitubox> [--verbose]
+ *   npx tsx tools/compareGraph.ts <file.chitubox> [--verbose]
  *
  * Aggregate counts hide compensating errors -- a builder that drops 20 supports
  * and invents 20 others scores perfect on totals. So this matches support to
  * support by pillar XY and reports MISSED and SPURIOUS separately.
  */
 import * as fs from 'node:fs';
-import { CbxParser, decodeSupportBlockRecords, cbxDebugBlocks } from './CbxParser';
-import { buildSupportGraph, type GraphRecord } from './converter/supportGraph';
-import { emitFromGraph } from './converter/graphEmit';
-import type { CbxSupport } from './converter/types';
+import { CbxParser, decodeSupportBlockRecords, cbxDebugBlocks } from '../CbxParser';
+import { buildSupportGraph, type GraphRecord } from '../converter/supportGraph';
+import { emitFromGraph } from '../converter/graphEmit';
+import type { CbxSupport } from '../converter/types';
 
 /** Two pillars are the same pillar when their XY centres agree this closely. */
 const MATCH_TOL_MM = 0.3;
@@ -123,7 +123,7 @@ if (process.argv[1] && process.argv[1].endsWith('compareGraph.ts')) {
   const verbose = args.includes('--verbose');
   const files = args.filter((a) => !a.startsWith('--'));
   if (files.length === 0) {
-    console.error('usage: npx tsx compareGraph.ts <file.chitubox> [--verbose]');
+    console.error('usage: npx tsx tools/compareGraph.ts <file.chitubox> [--verbose]');
     process.exit(2);
   }
   for (const f of files) {

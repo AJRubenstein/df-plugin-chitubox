@@ -25,6 +25,10 @@ Built-in DragonFruit plugin for importing `.chitubox` project files and converti
 - `CbxParser.ts` — container parsing, per-instance model table decode, geometry decode, and parametric support-record reconstruction.
 - `CbxConverter.ts` — conversion into DragonFruit support primitives (roots/trunks/knots/contact cones/braces) and model-id reassignment.
 - `converter/contactAssembly.ts` — contact-cone + socket construction shared with the support build path.
+- `converter/supportGraph.ts` — builds the endpoint graph the reconstruction runs on.
+- `converter/graphClassify.ts` — labels each connected component (brace, twig, stick, fan, tree…).
+- `converter/graphEmit.ts` — emits DragonFruit supports from the classified graph.
+- `tools/` — CLI helpers for corpus scanning and builder comparison; never imported by the plugin.
 - `GhostOverlay.tsx` — optional debug overlay for inspecting parsed support geometry.
 
 ## Container format note
@@ -37,12 +41,12 @@ Built-in DragonFruit plugin for importing `.chitubox` project files and converti
 - `4` — wide base pad cone
 - `5` — flat ground-contact foot disk (marks the plate; sometimes clustered into a platform)
 - `6` — summary record, skipped but unsure of it's purpose at the moment, rarely more than one in any file, some have none at all 
-- `9` — spherical knot joint atop a pillar
-- `12` — small support for connecting one part of model to another (usually for hard to support overhangs) 
+- `7` / `8` / `9` — spherical joint. Stored as a diameter segment: the two endpoints are opposite poles, so the joint sits at their midpoint.
+- `12` — twig: a short strut joining one part of the model to another, for overhangs that cannot reach the plate.
 
-Some `sub-1` records connect two pillar shafts rather than the model; these are reclassified as braces, and the pillars they join are kept as contactless trunks.
+Support reconstruction builds a graph rather than following record order: nodes are quantised record endpoints, edges are the shaft records (`1`, `2`, `3`, `12`), and spheres decorate the nodes they surround. Roles then fall out of the graph's shape — a pillar is a maximal run of vertical `sub-3` edges, a brace is a diagonal one, and a contact attaches to whichever pillar its authored socket lands on.
 
-'sub-12' records are not currently handled at all, and there are still some translation errors where supports that are intended as braces between other support trunks are translated as equivalent to 'sub-4' base cones.
+This matters because a support's role is **not** recorded in the file. The authoring app draws a brace and a structural pillar with identical geometry, and `sub` does not separate them, so the distinction has to be inferred from how the pieces connect.
 
 ## Geometry handling
 
@@ -75,6 +79,40 @@ If import fails, capture logs around:
 - per-instance model table decode (instance count, model filenames)
 - geometry region read (vertex counts)
 - support-record reconstruction (support / brace / contactless-pillar counts)
+
+## Development tools
+
+CLI helpers live in `tools/` and are never imported by the plugin itself.
+
+```
+npx tsx tools/scanCorpus.ts [--quiet] <dir> [dir...]
+```
+
+Parses every `.chitubox` file under the given roots and reports failures, exiting
+non-zero if any file fails. Run this after any parser change — it is the check that
+catches a fix for one file breaking nine others.
+
+```
+npx tsx tools/compareGraph.ts <file.chitubox> [--verbose]
+npx tsx tools/corpusCompare.ts <dir> [dir...]
+```
+
+Compare the graph reconstruction against the previous chain builder, per support
+rather than by totals. The chain builder is still reachable by setting
+`CBX_CHAIN_BUILDER=1`, so the two can be diffed across a corpus.
+
+## Tests
+
+```
+npx tsx --test CbxParser.test.ts
+CBX_CORPUS="/path/to/corpus" npx tsx --test CbxLayout.test.ts
+```
+
+`CbxParser.test.ts` runs from a synthetic fixture and needs nothing external.
+`CbxLayout.test.ts` asserts container invariants against real files and **skips**
+unless `CBX_CORPUS` names one or more directories; `CBX_FIXTURES` likewise points the
+parser regression test at real files. No corpus is committed, and absence skips
+rather than fails, so a clean checkout passes.
 
 ## Maintenance notes
 

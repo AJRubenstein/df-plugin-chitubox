@@ -1,7 +1,2 @@
-# Reverse-engineering notes and scratch tooling. Kept out of the repo
-# deliberately: these describe the host's internals rather than this plugin's
-# behaviour. The plugin must build and pass its tests without them.
-CBX_HOST_RE.md
-CBX_FORMAT.md
-HANDOFF_GRAPH_REBUILD.md
-re-tools/
+node_modules/
+.claude/

@@ -173,23 +173,13 @@ function buildStick(
   //   coneB = createContactAssembly(s, contactB, /* hint */ contactA, ...)
   //   segment = { bottomJoint: socketJointA, topJoint: socketJointB }
   //
-  // Two things I had wrong before:
-  //
-  //  1. ORIENTATION. The host puts cone A at the BOTTOM -- stickBuilder writes
-  //     `bottomJoint: socketJointA, topJoint: socketJointB`, and StickRenderer
-  //     falls back to contactConeA for the segment START and contactConeB for
-  //     the END. I had the authored model contact as cone B at the bottom and a
-  //     synthetic cap as cone A at the top, i.e. the stick inverted.
-  //
-  //  2. THE THIRD ARGUMENT. It is the OPPOSITE CONTACT, used as a direction
-  //     hint -- not a socket/hub position to anchor to. Passing hub joints made
-  //     each cone solve against a point that was not the other end of the stick.
-  //
-  // The shaft is defined by the two CONTACTS; the sockets (and therefore the
-  // joints) fall out of that solve. Since this support authors only one model
-  // contact, the top end is the hub the fan hangs from: a zero-length cone whose
-  // socket lands exactly on it, so it satisfies the two-cone type without
-  // drawing a second contact disk.
+  // The shaft is defined by the two CONTACTS; the sockets, and therefore the
+  // joints, fall out of that solve. The third argument is the OPPOSITE CONTACT
+  // used as a direction hint, not a position to anchor to. Where the file
+  // authors only one model contact, the far end is the hub the fan hangs from:
+  // a zero-length cone whose socket lands exactly on it, satisfying the
+  // two-cone shape without drawing a second contact disk.
+
   const CAP_LEN_MM = 1e-4;
   const extraTips = s.tips;
 
@@ -285,7 +275,7 @@ function buildStick(
   //
   //     { parentShaftId: seg.id, t: 1.0, pos: joint.pos, diameter: joint.diameter }
   //
-  // Three details matter, and I had all three slightly off:
+  // Three details matter, and all three are easy to get subtly wrong:
   //   - pos is the JOINT'S OWN position, not a point re-projected onto the
   //     segment line. The joint is already on the line; re-deriving it introduced
   //     a sub-millimetre disagreement between pos and t.

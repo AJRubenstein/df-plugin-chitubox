@@ -8,7 +8,7 @@
  * The corpus lives outside the repo. Set CBX_CORPUS to a semicolon- or
  * comma-separated list of directories; without it these tests skip.
  *
- *   CBX_CORPUS="R:/3dprintstuff;S:/mini-stls" npx tsx --test CbxLayout.test.ts
+ *   CBX_CORPUS="/path/to/corpus;/another/corpus" npx tsx --test CbxLayout.test.ts
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert';

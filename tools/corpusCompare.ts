@@ -1,7 +1,7 @@
 /**
  * Corpus-wide per-file comparison: chain builder vs graph builder.
  *
- *   npx tsx corpusCompare.ts <dir> [dir...]
+ *   npx tsx tools/corpusCompare.ts <dir> [dir...]
  *
  * Per-file, and per-support within each file. Totals alone would let a builder
  * that drops 20 supports and invents 20 others look perfect.

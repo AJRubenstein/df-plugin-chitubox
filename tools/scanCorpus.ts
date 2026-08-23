@@ -2,21 +2,21 @@
  * Corpus scanner: run CbxParser over every .chitubox file under one or more
  * roots and report failures.
  *
- *   npx tsx scanCorpus.ts <dir> [dir...]
- *   npx tsx scanCorpus.ts --quiet <dir>     only failures and the summary
+ *   npx tsx tools/scanCorpus.ts <dir> [dir...]
+ *   npx tsx tools/scanCorpus.ts --quiet <dir>     only failures and the summary
  *
  * Exits non-zero if any file throws, so it can gate a commit.
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { CbxParser } from './CbxParser';
+import { CbxParser } from '../CbxParser';
 
 const args = process.argv.slice(2);
 const quiet = args.includes('--quiet');
 const roots = args.filter((a) => !a.startsWith('--'));
 
 if (roots.length === 0) {
-  console.error('usage: npx tsx scanCorpus.ts [--quiet] <dir> [dir...]');
+  console.error('usage: npx tsx tools/scanCorpus.ts [--quiet] <dir> [dir...]');
   process.exit(2);
 }
 

@@ -216,7 +216,7 @@ describe('CbxParser.parseBuffer — chain model', () => {
  * The fixture is a 3.8 MB binary and is not committed. Drop SPOTLIGHT.chitubox
  * beside this file, or point CBX_FIXTURES at a directory holding it:
  *
- *   CBX_FIXTURES="R:/allancodejunk/techno sun goddess" npx tsx --test CbxParser.test.ts
+ *   CBX_FIXTURES="/path/to/fixtures" npx tsx --test CbxParser.test.ts
  *
  * Auto-skips when the fixture cannot be found.
  */
