@@ -158,10 +158,9 @@ export interface CbxSupport {
    * when the support spans between two parts of the model rather than standing
    * on the plate. Its socket meets the pillar bottom; its contact is below.
    *
-   * With one of these the support is a DragonFruit Stick: a model-to-model
-   * element whose two contact cones are this one and the lowest upward tip,
-   * with the pillar as its body. Any remaining upward tips become leaves or
-   * branches on the hub.
+   * With one of these the support is a DragonFruit Stick.
+   * Any remaining upward tips become leaves or branches on the hub.
+   * 
    */
   downwardTip?: CbxTip;
 }
@@ -201,9 +200,7 @@ export interface CbxBrace {
 }
 
 /**
- * A twig: a tiny model-to-model support (a short strut whose BOTH ends contact the
- * model, using the model itself as the brace). Distinct from a brace (which links
- * two supports) — a twig never touches a support. Cbx stores it as a sub-12 record.
+ * A twig support equiv. Cbx stores it as a sub-12 record.
  */
 export interface CbxTwig {
   /** Contact endpoint A (world space, on the model surface). */

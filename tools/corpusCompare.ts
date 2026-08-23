@@ -6,8 +6,6 @@
  * Per-file, and per-support within each file. Totals alone would let a builder
  * that drops 20 supports and invents 20 others look perfect.
  */
-const _log = console.log; console.log = () => {};
-const _warn = console.warn; console.warn = () => {};
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { compareFile } from './compareGraph';
@@ -24,9 +22,23 @@ function walk(dir: string, out: string[] = []): string[] {
 }
 
 const files = process.argv.slice(2).flatMap((r) => walk(r)).sort();
-interface Row { file: string; missed: number; spurious: number; bs: number; gs: number; bt: number; gt: number; bb: number; gb: number; err?: string }
+interface Row {
+  file: string; missed: number; spurious: number;
+  bs: number; gs: number; bt: number; gt: number; bb: number; gb: number;
+  warnings: string[]; err?: string;
+}
 const rows: Row[] = [];
+const origLog = console.log;
+const origWarn = console.warn;
+
 for (const f of files) {
+  // The parser's per-instance chatter would bury the report, so console.log is
+  // dropped for the duration of the parse. Warnings are KEPT -- an unplaced part
+  // is the kind of difference this tool exists to surface -- and reported per
+  // file below. Restored in `finally` so a throw cannot leave the process mute.
+  const warnings: string[] = [];
+  console.log = () => {};
+  console.warn = (...a: unknown[]) => { warnings.push(a.join(' ')); };
   try {
     const r = compareFile(f);
     rows.push({
@@ -35,12 +47,19 @@ for (const f of files) {
       bs: r.baseline.supports, gs: r.graph.supports,
       bt: r.baseline.tips, gt: r.graph.tips,
       bb: r.baseline.braces, gb: r.graph.braces,
+      warnings,
     });
   } catch (e) {
-    rows.push({ file: path.basename(f), missed: -1, spurious: -1, bs: 0, gs: 0, bt: 0, gt: 0, bb: 0, gb: 0, err: String(e).slice(0, 80) });
+    rows.push({
+      file: path.basename(f), missed: -1, spurious: -1,
+      bs: 0, gs: 0, bt: 0, gt: 0, bb: 0, gb: 0,
+      warnings, err: String(e).slice(0, 80),
+    });
+  } finally {
+    console.log = origLog;
+    console.warn = origWarn;
   }
 }
-console.log = _log; console.warn = _warn;
 
 const ok = rows.filter((r) => !r.err);
 const failed = rows.filter((r) => r.err);
@@ -64,3 +83,13 @@ for (const r of worst.slice(0, 30)) {
   console.log(`  ${r.file.padEnd(46)} missed=${String(r.missed).padStart(3)} spur=${String(r.spurious).padStart(3)}  sup ${r.bs}->${r.gs}  tips ${r.bt}->${r.gt}  brace ${r.bb}->${r.gb}`);
 }
 for (const r of failed) console.log(`  THREW ${r.file}: ${r.err}`);
+
+// Parser warnings are the point of this tool as much as the counts are: an
+// unplaced part is a real difference, so surface it rather than dropping it.
+const warned = rows.filter((r) => r.warnings.length > 0);
+if (warned.length > 0) {
+  console.log(`\nfiles with parser warnings: ${warned.length}`);
+  for (const r of warned) {
+    for (const w of r.warnings) console.warn(`  ${r.file}: ${w}`);
+  }
+}
