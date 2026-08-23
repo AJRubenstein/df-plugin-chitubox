@@ -211,7 +211,7 @@ describe('CbxParser.parseBuffer — chain model', () => {
 /**
  * Real-file regression against the verified SPOTLIGHT reconstruction (7 supports,
  * 8 tips, including branched support IV). Ground truth comes from an independent
- * Cbx layer scrub, NOT the (previously-buggy) Python oracle.
+ * Cbx layer scrub.
  *
  * The fixture is a 3.8 MB binary and is not committed. Drop SPOTLIGHT.chitubox
  * beside this file, or point CBX_FIXTURES at a directory holding it:

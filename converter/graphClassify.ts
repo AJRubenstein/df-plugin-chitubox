@@ -1,20 +1,9 @@
 /**
  * Classify the components of a support graph into the roles the importer needs.
  *
- * The graph (supportGraph.ts) says what is connected to what. This pass says
- * what each connected piece IS, using only measurable properties — never record
+ * The graph (supportGraph.ts) says what is connected to what; this pass says
+ * what each connected piece IS, from measurable properties only -- never record
  * order, never a fixed grouping.
- *
- * Shape census over 161 files / 12,668 components, which is what these rules are
- * fitted to:
- *
- *   28.3%  1 pillar, no tip, ungrounded      -> a BRACE (97.7% diagonal, median 2.41mm)
- *   25.8%  1 tip + 1 pillar, grounded        -> the plain support
- *    7.7%  4+ tips, 1 pillar, 1 branch node  -> a FAN off a single shaft
- *    6.5%  4+ tips, 4+ pillars, 3+ branches  -> a TREE
- *    2.9%  1 twig, ungrounded                -> model-to-model TWIG
- *
- * The remainder are the same shapes with smaller tip counts.
  */
 
 import type { SupportGraph, GraphNode } from './supportGraph';
@@ -31,10 +20,8 @@ export type ComponentKind =
    * Spans between two parts of the model instead of standing on the plate:
    * ungrounded, with a contact at each end. The .chitubox signature is a tip
    * pointing DOWN from the pillar bottom, which in graph terms is simply a
-   * second contact on an ungrounded component.
-   *
-   * 324 across the corpus: 248 with exactly 2 contacts, the rest fanning to as
-   * many as 11.
+   * second contact on an ungrounded component. Most have exactly two contacts,
+   * but they can fan to many more.
    */
   | 'stick'
   /** One contact, one shaft to the plate. */
@@ -102,9 +89,8 @@ export function classifyComponent(graph: SupportGraph, nodeIds: number[]): Class
   // A lone twig record is a model-to-model strut: both its ends are contacts.
   if (edges.length === 1 && subs[0] === 12) return { kind: 'twig', ...base };
 
-  // A lone ungrounded shaft that runs diagonally is a brace between two other
-  // supports. It carries no contact and stands on nothing, so it can only be
-  // bracing. 3,497 of 3,579 such components are diagonal.
+  // A lone ungrounded shaft that runs diagonally carries no contact and stands
+  // on nothing, so it can only be bracing two other supports.
   if (edges.length === 1 && subs[0] === 3 && groundNodes.length === 0) {
     const e = graph.edges[edges[0]];
     const a = graph.nodes[e.a];

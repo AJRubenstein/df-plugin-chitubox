@@ -47,7 +47,7 @@ const FOOT_SUB = 5; // wide flat ground-contact disk; its bottom marks the plate
 const TWIG_SUB = 12; // tiny model-to-model support: a short strut whose BOTH ends
                      // contact the model, using the model itself as the brace.
 const MODEL_HDR_SUB = 2; // skip
-const SUMMARY_SUB = 6; // skip (was previously NOT skipped — bug)
+const SUMMARY_SUB = 6; // skip
 
 const INLINE_PAD = 436;
 // The gap from an instance's support pointer to its first TAG record. 436 in
@@ -345,9 +345,8 @@ function parseSupportBlock(
 
   // A sub-3 record is a BRACE (diagonal strut between two shafts) when its two
   // endpoints differ in XY; otherwise it is a normal vertical pillar. Splitting
-  // here keeps the vertical-chain logic below unchanged and routes braces to
-  // their own output (previously these diagonal struts were silently dropped as
-  // "tipless pillars").
+  // here keeps the vertical-chain logic below unchanged and routes diagonal
+  // struts to their own output.
   const isBrace = (r: RawRecord): boolean =>
     r.sub === PILLAR_SUB && Math.hypot(r.x - r.x2, r.y - r.y2) > BRACE_XY_MIN;
 
@@ -617,8 +616,7 @@ function parseSupportBlock(
   // (or the platform they form) — instead we ground each support to its own foot
   // bottom: lower the base pad to the foot bottom (the plate) and extend the
   // pillar down to meet it, leaving the knot/tips/pillar-top untouched so model
-  // contact is unchanged. This is the principled form of the old height heuristic:
-  // sub-5 is the authoritative ground anchor, so a support raised onto a platform
+  // contact is unchanged. sub-5 is the authoritative ground anchor, so a support raised onto a platform
   // is grounded by however much its foot is tall — no magic threshold, and bare
   // mid-air pillars (no foot beneath them) are correctly left alone.
   const FOOT_MATCH_TOL_MM = 1.0; // a support owns the foot within this XY radius
@@ -788,8 +786,7 @@ function parseSupportBlock(
       isForkJunction: fork,
       // A contact hanging DOWN from the pillar bottom means this support spans
       // between two parts of the model rather than standing on the plate. Its
-      // socket sits on the bottom knot; the chain builder only matches tips to
-      // the TOP knot, so it is picked up here.
+      // Its socket sits on the bottom knot rather than the top.
       downwardTip: (() => {
         // Exactly one downward tip per stick-shaped support across every test
         // file (verified by trace); find() is sufficient.
@@ -1122,12 +1119,9 @@ export class CbxParser {
     // Z offset: the raft sits at the most-negative authored Z, and the scene is
     // lifted by that much so the plate lands at zero.
     //
-    // This reads topZ/botZ out of the parametric records rather than sweeping
-    // raw floats. The old sweep ran from the first TAG to EOF, which assumed
-    // support blocks precede geometry; where they follow it the window instead
-    // covered the record table, and a plate X of -64.671 was read as a Z. Only
-    // a multi-model plate spread wide enough to author a large negative plate
-    // coordinate exposes it, which is why single-model files never showed it.
+    // Read topZ/botZ out of the parametric records rather than sweeping raw
+    // floats: a sweep cannot tell a plate coordinate from a Z, and support
+    // blocks do not reliably precede geometry.
     let minZ = 0.0;
     let sawSupportRecord = false;
     for (let k = 0; k < nInstances; k++) {

@@ -15,14 +15,12 @@
  *   caps   = sphere records (sub 7, 8, 9) decorating the node at their CENTRE
  *   anchors= feet (sub 5) and bases (sub 4) pinning whichever node they touch
  *
- * A node of degree > 2 is a branch point. That is the multi-tip junction the
- * chain builder has to special-case; here it falls out of the structure.
+ * A node of degree > 2 is a branch point -- the multi-tip junction, falling out
+ * of the structure rather than needing a special case.
  *
- * Measured over 161 files / 72,974 records:
- *   - sphere |P1-P2| == 2*r1 in 15,768 / 15,768 (they are DIAMETER segments,
- *     so the joint is at the centre, not at either pole)
- *   - sphere centre lands on a shaft endpoint in 15,767 / 15,768 (0.000mm)
- *   - 67,468 distinct nodes: 76.3% degree 1, 16.4% degree 2, 7.4% degree > 2
+ * Note that a sphere record is a DIAMETER segment: its two endpoints are
+ * opposite poles, so the joint sits at their midpoint, which in turn lands on a
+ * shaft endpoint.
  */
 
 /** Quantisation for endpoint identity, in mm. Coincidences in the file are exact. */
@@ -32,15 +30,10 @@ const NODE_EPSILON_MM = 1e-3;
  * Perpendicular distance under which a free endpoint is taken to land ON another
  * shaft rather than merely near it.
  *
- * Most authored T-junctions are exact -- 36.6% of free endpoints sit at <=0.05mm
- * -- but a second, smaller population sits at 0.2-0.5mm (1.7%), separated from
- * the first by a near-empty band (0.1% between 0.05 and 0.2). Those are real
- * joins too: a diagonal strut in guns.chitubox anchors 0.368mm off its host
- * pillar at t=0.198, and at a 0.05 tolerance it missed and the strut ran on
- * across the model to find something else.
- *
- * 0.5 spans both populations and stops short of the 0.5-1.0mm band (9.6%), which
- * is where unrelated neighbouring shafts start to appear.
+ * Free-endpoint distances fall into two populations: exact joins at <=0.05mm and
+ * a smaller band at 0.2-0.5mm, separated by a near-empty gap. Both are real
+ * joins. 0.5 spans them and stops short of 0.5-1.0mm, where unrelated
+ * neighbouring shafts begin.
  */
 const T_JUNCTION_TOL_MM = 0.5;
 
@@ -50,19 +43,16 @@ const T_JUNCTION_MIN_T = 0.001;
 /**
  * Radius within which an endpoint is taken to be held by an anchor.
  *
- * Anchors are authored at a small but consistent standoff, not coincident: the
- * MINIMUM gap across 9,781 anchors is 0.00200mm and the median is the same, so a
- * 1e-3 node quantisation loses every one of them. 0.05 captures 87.8%; widening
- * to 0.6 adds five anchors in the whole corpus, so the remaining 12% are a
- * different relationship rather than a wider spread of the same one.
+ * Anchors are authored at a small standoff rather than coincident, so node
+ * quantisation alone loses them. Widening this well past 0.05 adds almost
+ * nothing, so endpoints beyond it are a different relationship.
  */
 const ANCHOR_TOL_MM = 0.05;
 
 /**
  * An endpoint sitting on the anchor ground plane is grounded even when no
- * individual anchor record is within ANCHOR_TOL_MM: 98.5% of otherwise
- * unresolved pillar ends are exactly on that plane. Treating them as isolated
- * fragments a support that is in fact standing on the plate.
+ * individual anchor record is within ANCHOR_TOL_MM. Treating such an endpoint
+ * as isolated fragments a support that is in fact standing on the plate.
  */
 const GROUND_PLANE_TOL_MM = 0.01;
 
@@ -188,8 +178,8 @@ export function buildSupportGraph(records: GraphRecord[]): SupportGraph {
   // branched support falls apart. Split the host edge at the contact parameter
   // and rewire both halves through the new node.
   //
-  // Measured over the corpus: of 50,300 pillar endpoints, 42.4% match an
-  // endpoint, 37.4% are T-junctions, 17.0% land on an anchor.
+  // A pillar end either meets another endpoint exactly, lands mid-shaft as a
+  // T-junction, or is held by an anchor; all three are common.
   const splitEdgeAt = (edgeIdx: number, nodeId: number): void => {
     const e = edges[edgeIdx];
     if (e.a === nodeId || e.b === nodeId) return;
@@ -273,8 +263,7 @@ export function buildSupportGraph(records: GraphRecord[]): SupportGraph {
 
   // Ground plane. An endpoint level with the anchors' own bottom plane is
   // standing on the plate even when no anchor record is within ANCHOR_TOL_MM:
-  // 98.5% of otherwise-unresolved pillar ends sit exactly on it. Without this
-  // they look isolated and their support fragments.
+  // Without this they look isolated and their support fragments.
   if (anchors.length > 0) {
     const planeVotes = new Map<number, number>();
     for (const r of anchors) {

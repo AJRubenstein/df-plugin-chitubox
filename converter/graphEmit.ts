@@ -1,55 +1,22 @@
 /**
- * Emit importer entities from a support graph.
- *
- * The graph (supportGraph.ts) says what is connected to what. This pass says
- * what to build from it, in the CbxSupport / CbxBrace / CbxTwig vocabulary the
- * converter already consumes, so it can stand in for the chain builder rather
- * than requiring a parallel pipeline.
- *
- * # The decomposition
- *
- * The previous emitter walked a path from each model contact down to ground and
- * called the longest shaft on that path the pillar. That collapses on trees: in
- * a tree several contacts share a trunk, resolve to the same pillar edge, and
- * only one survives. On NOSFERATU it produced 57 supports against 80, dropping
- * 26, because 83 of that file's 109 contacts live inside `tree` components.
- *
- * The rule here is structural instead of path-based:
+ * Emit importer entities from a support graph, in the CbxSupport / CbxBrace /
+ * CbxTwig vocabulary the converter consumes.
  *
  *   a PILLAR is a maximal run of VERTICAL sub-3 edges
  *   a BRACE  is a DIAGONAL sub-3 edge
  *   a TIP    attaches to the pillar its authored socket lands on
  *   a TWIG   is a sub-12 edge (both ends on the model)
  *
- * A pillar is therefore an object in its own right rather than a by-product of
- * walking from some contact, so contacts sharing a trunk no longer compete: each
- * lands on whichever pillar it actually meets. Measured on NOSFERATU before any
- * emission: 79 maximal vertical runs against 80 authored supports, 112 diagonal
- * edges against 111 authored braces, 109 sub-1 records against 109 authored
- * tips. The structure falls out of the geometry.
+ * Verticality is a SHAPE test, used only to cut the graph into runs -- never to
+ * decide which shaft carries a contact.
  *
- * Verticality is used here as a SHAPE test, to cut the graph into runs, which is
- * what it is reliable for. It is deliberately NOT used as a load test: the
- * handoff records that requiring a vertical pillar during path selection dropped
- * 23% of supports. Those are different jobs, and nothing below walks a path.
+ * A run that reaches no ground node is flagged, not dropped: CHITUBOX builds
+ * multi-level trees where a pillar starts mid-air at a brace convergence, and
+ * the converter emits those as a Branch parented to the convergence knot.
  *
- * # Mid-air pillars
- *
- * A run that reaches no ground node is not an error. CHITUBOX builds multi-level
- * trees in which a pillar starts mid-air where braces converge; the chain
- * builder models this as `isForkJunction`, and the converter emits such a pillar
- * as a Branch parented to the convergence knot instead of a grounded trunk with
- * a root cup floating in space. 19 of NOSFERATU's 80 supports are of this kind,
- * so runs are flagged the same way here.
- *
- * # About the brace label
- *
- * Brace-vs-structure is not recoverable from the file: the host never tests
- * `sub`, braces and pillars draw as identical 60-triangle cylinders, and radius
- * does not separate them (0.40 is the most common value in both classes). The
- * label is ours to define. Defining it as "diagonal" is a shape statement, and
- * it reproduces the authored brace count to within one on NOSFERATU, which the
- * previous load-based definition ("an edge no support path walked") did not.
+ * Brace-vs-structure is not recoverable from the file -- both draw as identical
+ * cylinders and `sub` does not separate them -- so diagonal is taken to mean
+ * brace.
  */
 
 import type { CbxBrace, CbxJunctionBranch, CbxSupport, CbxTip, CbxTwig } from './types';
@@ -58,9 +25,8 @@ import type { SupportGraph, GraphNode, GraphEdge } from './supportGraph';
 /**
  * XY offset under which a sub-3 edge is a pillar segment outright.
  *
- * Authored pillars are dead vertical: 12,193 of 25,150 sub-3 records across the
- * corpus carry EXACTLY identical endpoint XY. This only has to absorb float
- * round-trip, not a real spread.
+ * Authored pillars are dead vertical -- most carry exactly identical endpoint
+ * XY -- so this only has to absorb float round-trip, not a real spread.
  */
 const VERTICAL_XY_TOL_MM = 0.05;
 
@@ -75,10 +41,9 @@ const VERTICAL_XY_TOL_MM = 0.05;
  *   - a genuine pillar segment, which is vertical
  *   - a stub joining the tops of two ADJACENT pillars, which runs at ~45°
  *
- * Measured over every sub-3 record with a non-zero XY span of 0.3mm or less:
- * 427 of 430 sit at slope 0.9–1.5 (i.e. ~45°), 2 are near horizontal, and
- * exactly 1 is near vertical. The two populations are cleanly separated by
- * angle, so angle is what decides.
+ * Short sub-3 records are almost all ~45° stubs; near-vertical ones are
+ * vanishingly rare. The populations separate cleanly by angle, so angle decides
+ * -- deciding by length instead welds two separate supports into one run.
  */
 const VERTICAL_SLOPE_MAX = 0.2;
 
@@ -358,8 +323,8 @@ export function emitFromGraph(
   // CHITUBOX builds multi-level trees whose upper tier hangs off a knot that is
   // reached by a diagonal alone, with the tips fanning out from there. Such a
   // tip sockets onto a brace endpoint rather than onto any pillar, so the block
-  // above cannot place it: measured across the corpus, ALL 868 tips that match
-  // no pillar socket onto a diagonal endpoint, and none onto anything else.
+  // above cannot place it. Every tip that matches no pillar sockets onto a
+  // diagonal endpoint, so this is one phenomenon rather than a residue.
   //
   // The converter already models this as a Branch parented to the pillar the
   // feeding brace comes from (see CbxJunctionBranch), so the whole upper tier is

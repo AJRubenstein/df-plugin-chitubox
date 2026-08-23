@@ -787,10 +787,9 @@ export class CbxConverter {
     /**
      * Resolve the pillar a brace endpoint attaches to.
      *
-     * XY alone is NOT enough. On stacked-tier models (Supported_Chest_Back) 148 of
-     * 534 brace endpoints have two or more pillars inside the 1mm XY tolerance --
-     * tiers sitting almost directly above one another, e.g. z-spans
-     * [-50.48..-40.37] and [-43.30..-39.95] at the same XY. Picking by XY distance
+     * XY alone is NOT enough. On stacked-tier models many brace endpoints have
+     * two or more pillars inside the XY tolerance, tiers sitting almost directly
+     * above one another. Picking by XY distance
      * alone can bind the endpoint to the wrong tier, and the brace then stretches
      * from its authored end to a shaft somewhere else entirely: the "really long
      * super brace" artefact. Authored braces on this model are all short 45deg
@@ -1678,8 +1677,7 @@ export class CbxConverter {
    * which belongs to no displayed model: the host's support tab filters
    * interactable supports per model, so a mis-tagged entity renders as static
    * geometry but cannot be selected, and per-model model drags don't move it.
-   * (This was the brace "renders but won't connect / won't move" bug — braces
-   * were the one emitted type the old reassign skipped.)
+   * Every emitted type must be covered here.
    */
   static reassignModelId(data: DragonfruitImportFormat, modelId: string): void {
     if (!modelId) return;
