@@ -32,9 +32,6 @@ const KNOT_SUB = 9; // spherical joint atop the pillar
 const PILLAR_SUB = 3; // vertical shaft (NOT a tip — this was the core bug)
 const BASE_SUB = 4; // wide base pad cone (only on larger supports)
 const FOOT_SUB = 5; // wide flat ground-contact disk; its bottom marks the plate.
-                    // One sits under each support (sometimes clustered into what
-                    // looks like a "platform"). The disk bottom is always exactly
-                    // at the plate, so it is the authoritative ground anchor.
 const TWIG_SUB = 12; // tiny model-to-model support: a short strut whose BOTH ends
                      // contact the model, using the model itself as the brace.
 const MODEL_HDR_SUB = 2; // skip

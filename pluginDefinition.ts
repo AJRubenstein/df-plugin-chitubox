@@ -3,21 +3,13 @@ import type { ComplexPluginDefinition } from '@/features/plugins/complexPluginCo
 /**
  * Built-in plugin descriptor for DragonFruit's Chitubox project-file import capability.
  *
- * File-type only: no runtime protocol, encoder or network surface. The import
- * warning sets expectations up front, since support topology may differ
- * slightly from the authoring app after conversion.
- *
- * `.chitubox` is a little-endian binary project file storing model geometry as
- * float32 triangles and supports as parametric records. Plate XY is decoded and
- * applied at import; per-model rotation and the support-settings UI header
- * remain undecoded and are not required.
  */
 const PLUGIN_DEFINITION: ComplexPluginDefinition = {
   id: 'chitubox-import',
   manifest: {
     id: 'chitubox-import-builtin',
     name: 'Chitubox File Support',
-    version: '0.1.0',
+    version: '0.1.3',
     description: 'Imports .chitubox project files into DragonFruit',
     author: 'Open Resin Alliance',
     homepage: 'https://github.com/Open-Resin-Alliance/df-plugin-chitubox',
