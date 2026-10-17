@@ -9,8 +9,8 @@ const PLUGIN_DEFINITION: ComplexPluginDefinition = {
   manifest: {
     id: 'chitubox-import-builtin',
     name: 'Chitubox File Support',
-    version: '0.1.3',
-    description: 'Imports .chitubox project files into DragonFruit',
+    version: '0.1.4',
+    description: 'Imports .chitubox and .ctp project files into DragonFruit',
     author: 'Open Resin Alliance',
     homepage: 'https://github.com/Open-Resin-Alliance/df-plugin-chitubox',
   },
@@ -31,6 +31,17 @@ const PLUGIN_DEFINITION: ComplexPluginDefinition = {
         title: 'Chitubox Import',
         body: 'Chitubox import converts Chitubox project data into DragonFruit format. Support placement may differ from the original scene, and plate position/orientation are not recovered.',
         storageKey: 'dragonfruit.chituboxImportWarningDismissed',
+      },
+    },
+    {
+      fileExtension: '.ctp',
+      mimeType: 'application/octet-stream',
+      displayName: 'CTP Project',
+      isSceneFile: true,
+      importWarning: {
+        title: 'Chitubox Pro Import',
+        body: 'CTP import converts Chitubox Pro project data into DragonFruit format. Support placement may differ from the original scene.',
+        storageKey: 'dragonfruit.ctpImportWarningDismissed',
       },
     },
   ],

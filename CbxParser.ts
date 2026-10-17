@@ -842,7 +842,7 @@ export class CbxParser {
     // table sits immediately after the fixed header). The rule below needs no
     // special case for any of them: verified against 161/161 files.
     const ptrBlock = u32(view, 12);
-    const ptrBlockUsable = ptrBlock + 16 <= len;
+    const ptrBlockUsable = ptrBlock > 0 && ptrBlock + 16 <= len;
     const meshOffset = ptrBlockUsable ? u32(view, ptrBlock + 12) : u32(view, 424);
     const tableDelta = ptrBlockUsable ? u32(view, ptrBlock + 8) : 444;
 
@@ -854,7 +854,7 @@ export class CbxParser {
     // out of range, ignore it — the probe below finds the real record table,
     // and geometry is always read from the per-record pointers.
     const meshOffsetUsable = meshOffset > 0 && meshOffset + 724 <= len;
-    if (!meshOffsetUsable) {
+    if (ptrBlock !== 0 && !meshOffsetUsable) {
       console.warn(
         `${LOG_PREFIX} meshOffset (${meshOffset}) is out of range for a `
         + `${len}-byte file; falling back to a full-file scan for supports.`,
@@ -886,7 +886,7 @@ export class CbxParser {
     //                parametric record block starts at (supPtr + INLINE_PAD).
     //   tail+16 u32  geometry START offset
     //   tail+20 u32  geometry byte count (tris = bytes/36); geoEnd = start+count
-    //   tail+24      record terminator (last two bytes always 0x4E 0xFF)
+    //   tail+24      usually 0x4EFF; 0x0000 in some writers
     //
     // Absolute field positions for record k:
     //   filename @ meshOffset + 444 + k*680

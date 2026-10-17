@@ -1,11 +1,11 @@
 # Chitubox Import Plugin (`chitubox-import`)
 
-Built-in DragonFruit plugin for importing `.chitubox` project files and converting their model geometry and support data into DragonFruit's internal format.
+Built-in DragonFruit plugin for importing `.chitubox` (ChiTuBox Basic) and `.ctp` (ChiTuBox Pro) project files and converting their model geometry and support data into DragonFruit's internal format.
 
 ## What this plugin does
 
-- Parses `.chitubox` containers and their per-instance model table.
-- Reads model geometry (flat 36-byte triangles) for each model instance.
+- Parses `.chitubox` and `.ctp` containers and their per-object model tables.
+- Reads model geometry for each model instance (flat triangles for `.chitubox`, indexed triangles for `.ctp`).
 - Decodes the parametric support records and rebuilds them as editable DragonFruit primitives (roots, trunks, knots, contact cones, braces).
 - Converts supports into DragonFruit's import format (`DragonfruitImportFormat`).
 - Applies per-model transform alignment (plate XY + authored lift) so models and supports land correctly on the build plate.
@@ -22,7 +22,8 @@ Built-in DragonFruit plugin for importing `.chitubox` project files and converti
 
 - `pluginDefinition.ts` — plugin manifest + file type registration.
 - `fileTypeHandlers.ts` — project-file import bridge used by the host file importer; handles model placement, model naming, and single/multi-model payloads.
-- `CbxParser.ts` — container parsing, per-instance model table decode, geometry decode, and parametric support-record reconstruction.
+- `CbxParser.ts` — `.chitubox` container parsing, per-instance model table decode, geometry decode, and parametric support-record reconstruction.
+- `CtpParser.ts` — `.ctp` container parsing: object records, indexed mesh decode, transform, and 48-byte support pool reconstruction.
 - `CbxConverter.ts` — conversion into DragonFruit support primitives (roots/trunks/knots/contact cones/braces) and model-id reassignment.
 - `converter/contactAssembly.ts` — contact-cone + socket construction shared with the support build path.
 - `converter/supportGraph.ts` — builds the endpoint graph the reconstruction runs on.
@@ -48,6 +49,8 @@ Support reconstruction builds a graph rather than following record order: nodes 
 
 This matters because a support's role is **not** recorded in the file. The authoring app draws a brace and a structural pillar with identical geometry, and `sub` does not separate them, so the distinction has to be inferred from how the pieces connect.
 
+`.ctp` is a separate container: magic `0xAB231253`, chunked (`0x54` object transform, `0x55` indexed mesh, `0x56` support index). Object records sit at `0xD8` stride and point at a 48-byte support pool. Support roles are read from `field0` (`1` tip, `2`/`3` brace or pillar, `4` base, `5` foot, `7`/`9` knot), then fed into the same chain/graph conversion as `.chitubox`.
+
 ## Geometry handling
 
 - Reads each model instance's triangle region directly (`[geoStart, geoEnd)`), one clean read per model.
@@ -56,7 +59,7 @@ This matters because a support's role is **not** recorded in the file. The autho
 
 ## Legal notice (interoperability)
 
-This plugin includes format-compatibility work for `.chitubox` project files to enable interoperability between software ecosystems.
+This plugin includes format-compatibility work for `.chitubox` and `.ctp` project files to enable interoperability between software ecosystems.
 
 The project is developed in good faith for compatibility use cases, with attention to applicable legal frameworks such as:
 
@@ -72,7 +75,7 @@ Users are responsible for ensuring their use complies with applicable law in the
 
 ## Logging and diagnostics
 
-The plugin intentionally emits detailed import diagnostics (`[CbxParser]`, `[chitubox-import]`, `[CbxConverter]`) for troubleshooting unsupported variants.
+The plugin intentionally emits detailed import diagnostics (`[CbxParser]`, `[CtpParser]`, `[chitubox-import]`, `[CbxConverter]`) for troubleshooting unsupported variants.
 
 If import fails, capture logs around:
 
@@ -118,4 +121,4 @@ rather than fails, so a clean checkout passes.
 
 - Keep terminology neutral and compatibility-focused (`decode container`, `import compatibility`) rather than reverse-engineering language.
 - Keep parser and converter changes paired with focused tests when behavior changes.
-- Validate against real `.chitubox` files at each step; the support reconstruction is sensitive to the per-instance table stride and field offsets.
+- Validate against real `.chitubox` and `.ctp` files at each step; support reconstruction is sensitive to table strides and field offsets.

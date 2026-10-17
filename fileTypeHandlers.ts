@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { PluginFileTypeHandler } from '@/features/plugins/pluginFileTypeBridge';
 import { CbxParser } from './CbxParser';
+import { CtpParser } from './CtpParser';
 import { CbxConverter, computeRaftZ, type CbxModelInput } from './CbxConverter';
 import { createDefaultSettings } from '@/supports/Settings/types';
 import { v4 as uuidv4 } from 'uuid';
@@ -254,12 +255,13 @@ function deriveModelName(filename: string | null | undefined, index: number): st
 // Core import function (plain async — no React state)
 // ---------------------------------------------------------------------------
 
-export async function importCbxFile(
-  file: File,
-): Promise<CbxImportPayload | CbxImportPayload[]> {
-  console.log('[chitubox-import] Starting Cbx import...');
-  const parsed = await CbxParser.parse(file);
-
+async function importParsedProject(parsed: {
+  instanceCount: number;
+  modelCount: number;
+  geoModelCount: number;
+  zOffset: number;
+  models: CbxModelInput[];
+}): Promise<CbxImportPayload | CbxImportPayload[]> {
   const settings = createDefaultSettings();
   const models = parsed.models ?? [];
 
@@ -322,6 +324,16 @@ export async function importCbxFile(
   return payload;
 }
 
+export async function importCbxFile(file: File) {
+  console.log('[chitubox-import] Starting Cbx import...');
+  return importParsedProject(await CbxParser.parse(file));
+}
+
+export async function importCtpFile(file: File) {
+  console.log('[chitubox-import] Starting Ctp import...');
+  return importParsedProject(await CtpParser.parse(file));
+}
+
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // Plugin file-type handler (required export for fileType capability)
@@ -329,7 +341,9 @@ export async function importCbxFile(
 
 export const handleFileTypeImport: PluginFileTypeHandler = async (file: File) => {
   try {
-    const result = await importCbxFile(file);
+    const result = file.name.toLowerCase().endsWith('.ctp')
+      ? await importCtpFile(file)
+      : await importCbxFile(file);
     return { success: true, payload: result };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
