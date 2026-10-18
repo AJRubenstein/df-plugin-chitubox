@@ -1377,7 +1377,7 @@ export class CbxConverter {
       twigs,
       sticks,
       braces,
-      anchors: [],
+      stumps: [],
       knots,
       kickstands: [],
     };
@@ -1440,7 +1440,7 @@ export class CbxConverter {
     for (const twig of data.twigs || []) if (twig?.modelId) ids.add(twig.modelId);
     for (const stick of data.sticks || []) if (stick?.modelId) ids.add(stick.modelId);
     for (const brace of data.braces || []) if (brace?.modelId) ids.add(brace.modelId);
-    for (const anchor of data.anchors || []) if (anchor?.modelId) ids.add(anchor.modelId);
+    for (const stump of data.stumps || []) if (stump?.modelId) ids.add(stump.modelId);
     return [...ids];
   }
 
@@ -1462,7 +1462,7 @@ export class CbxConverter {
     for (const twig of data.twigs ?? []) twig.modelId = modelId;
     for (const stick of data.sticks ?? []) stick.modelId = modelId;
     for (const brace of data.braces) brace.modelId = modelId;
-    for (const anchor of data.anchors ?? []) anchor.modelId = modelId;
+    for (const stump of data.stumps ?? []) stump.modelId = modelId;
     console.log(`${LOG_PREFIX} reassignModelId`, {
       targetModelId: modelId,
       beforeModelIds: before,
