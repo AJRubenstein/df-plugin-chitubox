@@ -32,13 +32,9 @@ export function synthSupportForTip(tip: CbxTip, attachPos: Vec3): CbxContactInpu
 const UNTAPERED_CONTACT_RATIO = 0.6;
 
 /**
- * The contact diameter to build a cone with.
- *
- * A thin support carries no taper in the file: Cbx authors its contact at the
- * shaft radius, there being nothing to narrow from. The engine still sizes the
- * socket joint above the shaft, so a cone that wide leaves the joint standing
- * proud as a collar. Narrowing gives the joint something to sit over; the cone
- * keeps its authored length and axis, so only the tip moves.
+ * The contact diameter to build a cone with. A contact authored at the shaft
+ * width carries no taper, so it narrows and the socket joint has something to
+ * sit over; the cone keeps its authored length and axis.
  */
 function contactDiameterFor(tip: CbxTip, shaftMm: number): number | undefined {
   if (!Number.isFinite(tip.contactDiameter)) return undefined;

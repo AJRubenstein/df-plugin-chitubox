@@ -27,8 +27,7 @@ const spanModel = (pillarDiameter: number): CbxModelInput => ({
 });
 
 test('a thin two-contact support builds as a twig', () => {
-    // A stick sizes its joints off the shaft, which on a shaft this thin
-    // leaves them standing proud of the member.
+    // A stick sizes its joints off the shaft, leaving them proud at this width.
     const data = CbxConverter.convert(spanModel(0.3));
     assert.equal(data.sticks?.length ?? 0, 0, 'not a stick');
     assert.equal(data.twigs?.length ?? 0, 1, 'built as a twig');

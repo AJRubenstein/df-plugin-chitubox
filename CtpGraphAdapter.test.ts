@@ -45,8 +45,7 @@ test('a twig survives to the emitter', () => {
 });
 
 test('a pillar standing on the model becomes a stick', () => {
-    // Ungrounded shaft, a contact above and a contact hanging below: the shape
-    // .chitubox calls a stick. Previously every one of these became a trunk.
+    // Ungrounded shaft, a contact above and a contact hanging below.
     const records = [
         rec({ role: 3, x: 0, y: 0, topZ: 8, x2: 0, y2: 0, botZ: 5 }),
         rec({ role: 1, x: 0, y: 0, topZ: 9, x2: 0, y2: 0, botZ: 8, paramA: 0.1, paramB: 0.4 }),

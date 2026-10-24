@@ -12,8 +12,7 @@ const tip = (over: Partial<CbxTip>): CbxTip => ({
 });
 
 test('a brace binds to a stick shaft', () => {
-    // shaftRefs drives brace attachment. With only trunks registered, a brace
-    // landing on a stick bound to a distant trunk and was dropped as overlong.
+    // shaftRefs drives brace attachment, so a stick has to be in it.
     const model: CbxModelInput = {
         index: 0,
         filename: 'fixture',

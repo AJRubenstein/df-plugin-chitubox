@@ -13,10 +13,8 @@
 import type { PoolRecord } from '../CtpParser';
 
 /**
- * .ctp role for a contact hanging DOWN onto the model from a pillar bottom --
- * the foot of a support that stands on the model rather than the plate.
- * .chitubox authors the same thing as a tip whose contact sits below its
- * socket, which is how the emitter recognises it, so it maps onto tip.
+ * A contact hanging DOWN from a pillar bottom: the foot of a support standing
+ * on the model. The emitter finds it among tips, so it maps onto tip.
  */
 const ROLE_DOWNWARD_CONTACT = 2;
 const SUB_TIP = 1;
