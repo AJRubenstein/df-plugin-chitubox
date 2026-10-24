@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { CbxConverter } from './CbxConverter';
-import type { CbxModelInput, CbxTip } from './converter/types';
+import { CbxConverter } from '../CbxConverter';
+import type { CbxModelInput, CbxTip } from '../converter/types';
 
 const tip = (over: Partial<CbxTip>): CbxTip => ({
     x: 0, y: 0, contactZ: 3, attachZ: 1.4,

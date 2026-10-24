@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { CbxConverter } from './CbxConverter';
+import { CbxConverter } from '../CbxConverter';
 import type { DragonfruitImportFormat, Stump } from '@/supports/types';
 
 const stumpData = (): DragonfruitImportFormat => ({

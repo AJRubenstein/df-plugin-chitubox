@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { synthTipSettings } from './converter/geometryHelpers';
-import type { CbxTip } from './converter/types';
+import { synthTipSettings } from '../converter/geometryHelpers';
+import type { CbxTip } from '../converter/types';
 
 const tip = (contactDiameter: number): CbxTip => ({
     x: 0, y: 0, contactZ: 12, attachZ: 10,

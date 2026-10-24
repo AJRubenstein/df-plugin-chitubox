@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { collapseDegenerateJoints } from './converter/sanityPasses';
+import { collapseDegenerateJoints } from '../converter/sanityPasses';
 
 const joint = (id: string, z: number) => ({ id, pos: { x: 0, y: 0, z }, diameter: 0.4 });
 const segment = (id: string, bot: string, botZ: number, top: string, topZ: number) => ({

@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { toGraphRecords } from './converter/ctpGraphAdapter';
-import { buildSupportGraph } from './converter/supportGraph';
-import { emitFromGraph } from './converter/graphEmit';
-import type { PoolRecord } from './CtpParser';
+import { toGraphRecords } from '../converter/ctpGraphAdapter';
+import { buildSupportGraph } from '../converter/supportGraph';
+import { emitFromGraph } from '../converter/graphEmit';
+import type { PoolRecord } from '../CtpParser';
 
 const rec = (over: Partial<PoolRecord>): PoolRecord => ({
     role: 3, sub: 7,
