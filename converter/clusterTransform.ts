@@ -71,6 +71,12 @@ export function applyZShift(data: DragonfruitImportFormat, deltaZ: number): void
     shiftCone(stick.contactConeA);
     shiftCone(stick.contactConeB);
   }
+  for (const stump of data.stumps ?? []) {
+    if (stump.rootPos) stump.rootPos.z += deltaZ;
+    shiftJoint(stump.joint);
+    shiftSegments(stump.segments);
+    shiftCone(stump.contactCone);
+  }
   for (const leaf of data.leaves ?? []) {
     shiftCone(leaf.contactCone);
   }
@@ -149,6 +155,15 @@ export function applyXYShift(data: DragonfruitImportFormat, deltaX: number, delt
     shiftCone(stick.contactConeA);
     shiftCone(stick.contactConeB);
   }
+  for (const stump of data.stumps ?? []) {
+    if (stump.rootPos) {
+      stump.rootPos.x += dx;
+      stump.rootPos.y += dy;
+    }
+    shiftJoint(stump.joint);
+    shiftSegments(stump.segments);
+    shiftCone(stump.contactCone);
+  }
   for (const leaf of data.leaves ?? []) {
     // Leaves carry only a contact cone (no segments); its pos MUST shift with the
     // cluster or the leaf detaches from its (shifted) knot and tunnels. This was
@@ -172,5 +187,9 @@ export function applyXYShift(data: DragonfruitImportFormat, deltaX: number, delt
 export function seatRootsOnPlate(data: DragonfruitImportFormat, plateZ = 0): void {
   for (const root of data.roots) {
     if (root.transform?.pos) root.transform.pos.z = plateZ;
+  }
+  // A stump carries its root inline rather than as a Roots entity.
+  for (const stump of data.stumps ?? []) {
+    if (stump.rootPos) stump.rootPos.z = plateZ;
   }
 }
