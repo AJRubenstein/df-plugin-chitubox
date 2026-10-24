@@ -112,16 +112,17 @@ function buildStick(
   // a direction hint rather than an anchor. With only one authored contact the
   // far end is a zero-length cone at the hub.
 
-  const CAP_LEN_MM = 1e-4;
-  const extraTips = s.tips;
+  // The first upward contact is this member's far end; the rest fan off the hub
+  // as leaves, the same split a trunk makes between its cone and its extras.
+  const [endTip, ...extraTips] = s.tips;
 
   const hubTop: Vec3 = { x: s.pillarX, y: s.pillarY, z: z(s.pillarTopZ) };
   const hubBottom: Vec3 = { x: s.pillarX, y: s.pillarY, z: z(s.pillarBottomZ) };
 
   // A = the authored model contact, at the BOTTOM.
   const contactA = new THREE.Vector3(down.x, down.y, z(down.contactZ));
-  // B = the shaft's top terminus (the fan hub). Not a model contact.
-  const contactB = new THREE.Vector3(hubTop.x, hubTop.y, hubTop.z);
+  // B = the stick's upper end, its own model contact.
+  const contactB = new THREE.Vector3(endTip.x, endTip.y, z(endTip.contactZ));
 
   // The record gives the downward cone's axis exactly: socket on the pillar
   // bottom, contact 26.8 degrees off vertical from there. Feed that as the
@@ -140,27 +141,23 @@ function buildStick(
     true, true, downAxis, false,
   );
 
-  // Cone B caps the top. Aimed DOWN the shaft (toward cone A) so its socket
-  // lands on hubTop rather than beyond it, and given ~zero length so it has no
-  // visible cone body -- there is no second model contact to draw.
-  const capAxis = new THREE.Vector3(0, 0, -1);
+  // Cone B is the upper end's own contact, its axis read off the record the
+  // same way cone A's is.
+  const upAxis = new THREE.Vector3(
+    endTip.socketX - endTip.x,
+    endTip.socketY - endTip.y,
+    z(endTip.attachZ) - z(endTip.contactZ),
+  ).normalize();
   const assemblyB = createContactAssembly(
-    { ...synthSupportForTip(s.tips[0], hubTop), tipNormal: { x: capAxis.x, y: capAxis.y, z: capAxis.z } },
+    { ...synthSupportForTip(endTip, hubTop), tipNormal: { x: upAxis.x, y: upAxis.y, z: upAxis.z } },
     contactB,
     { x: contactA.x, y: contactA.y, z: contactA.z },
-    { length: CAP_LEN_MM, diameter: shaftDiameter, pointDiameter: shaftDiameter },
-    tipDefaults, mesh,
-    true, true, capAxis, false,
+    synthTipSettings(endTip, shaftDiameter), tipDefaults, mesh,
+    true, true, upAxis, false,
   );
 
   const jointA: Joint = assemblyA.socketJoint;
   const jointB: Joint = assemblyB.socketJoint;
-
-  // Pin the cap length: createContactAssembly re-solves lengthMm from the span
-  // and would otherwise restore the default, reinstating the stray second cone.
-  if (assemblyB.contactCone.profile) {
-    assemblyB.contactCone.profile.lengthMm = CAP_LEN_MM;
-  }
 
   const stick: Stick = {
     id: uuidv4(),
