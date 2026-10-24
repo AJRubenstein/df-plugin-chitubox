@@ -12,6 +12,7 @@ import {
   Vec3,
   Twig,
   Stick,
+  Stump,
   ContactDisk,
 } from '@/supports/types';
 import { SupportSettings } from '@/supports/Settings';
@@ -96,6 +97,8 @@ const JOINT_TAPER = 1.1; // twig joint = 1.1x its disk contact diameter
 const JOINT_CLEARANCE_MM = 0.05;
 /** Shaft at or below which a two-contact support builds as a twig, not a stick. */
 const TWIG_MAX_SHAFT_MM = 0.4;
+/** Tip height at or below which a shaftless support builds as a stump. */
+const STUMP_MAX_TIP_HEIGHT_MM = 5.0;
 
 function buildStick(
   s: CbxSupport,
@@ -1389,6 +1392,43 @@ export class CbxConverter {
       }
     }
 
+    // --- Stumps ---
+    // A support that reaches the model within the stump height and whose joint
+    // sits inside its own root cone has no shaft to draw. DragonFruit models
+    // that as a Stump: no segments, and the root carried inline.
+    const stumps: Stump[] = [];
+    const keptTrunks: Trunk[] = [];
+    const convertedRootIds = new Set<string>();
+    {
+      const rootById = new Map(roots.map((r) => [r.id, r]));
+      for (const trunk of trunks) {
+        const cone = trunk.contactCone;
+        const root = trunk.rootId ? rootById.get(trunk.rootId) : undefined;
+        const topJoint = trunk.segments[trunk.segments.length - 1]?.topJoint;
+        if (!cone || !root || !topJoint) { keptTrunks.push(trunk); continue; }
+
+        const plateZ = root.transform.pos.z;
+        const rootTopZ = plateZ + (root.diskHeight ?? 0) + (root.coneHeight ?? 0);
+        const shortEnough = cone.pos.z - plateZ <= STUMP_MAX_TIP_HEIGHT_MM;
+        if (!shortEnough || topJoint.pos.z >= rootTopZ) { keptTrunks.push(trunk); continue; }
+
+        convertedRootIds.add(root.id);
+        stumps.push({
+          id: trunk.id,
+          modelId: trunk.modelId,
+          // The authored root, kept rather than replaced by the native defaults.
+          rootPos: root.transform.pos,
+          rootBaseDiameter: root.diameter,
+          rootTopDiameter: trunk.baseDiameterMm ?? root.diameter,
+          rootHeight: (root.diskHeight ?? 0) + (root.coneHeight ?? 0),
+          joint: topJoint,
+          segments: [],
+          contactCone: cone,
+        });
+      }
+    }
+    const keptRoots = roots.filter((r) => !convertedRootIds.has(r.id));
+
     const result: DragonfruitImportFormat = {
       version: 1,
       meta: {
@@ -1397,18 +1437,19 @@ export class CbxConverter {
         objectCenter: { x: 0, y: 0, z: 0 },
         updatedAt: Date.now(),
       },
-      roots,
-      trunks,
+      roots: keptRoots,
+      trunks: keptTrunks,
       branches,
       leaves,
       twigs,
       sticks,
       braces,
-      stumps: [],
+      stumps,
       knots,
       kickstands: [],
     };
 
+    console.log(`${LOG_PREFIX} stumps`, { converted: stumps.length });
     console.log(`${LOG_PREFIX} convert:done`, {
       roots: result.roots.length,
       trunks: result.trunks.length,
