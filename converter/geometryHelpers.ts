@@ -28,10 +28,28 @@ export function synthSupportForTip(tip: CbxTip, attachPos: Vec3): CbxContactInpu
   };
 }
 
+/** How much of the shaft a taperless contact is narrowed to. */
+const UNTAPERED_CONTACT_RATIO = 0.6;
+
+/**
+ * The contact diameter to build a cone with.
+ *
+ * A thin support carries no taper in the file: Cbx authors its contact at the
+ * shaft radius, there being nothing to narrow from. The engine still sizes the
+ * socket joint above the shaft, so a cone that wide leaves the joint standing
+ * proud as a collar. Narrowing gives the joint something to sit over; the cone
+ * keeps its authored length and axis, so only the tip moves.
+ */
+function contactDiameterFor(tip: CbxTip, shaftMm: number): number | undefined {
+  if (!Number.isFinite(tip.contactDiameter)) return undefined;
+  if (!Number.isFinite(shaftMm) || tip.contactDiameter < shaftMm) return tip.contactDiameter;
+  return shaftMm * UNTAPERED_CONTACT_RATIO;
+}
+
 /**
  * tipSettings for createContactAssembly.
  *   length        <- authored cone length.
- *   pointDiameter <- authored contactDiameter, never defaulted.
+ *   pointDiameter <- authored contactDiameter, narrowed when it carries no taper.
  *   diameter      <- the SHAFT diameter this tip grows from, not the authored
  *                    body diameter.
  *
@@ -46,7 +64,7 @@ export function synthTipSettings(tip: CbxTip, shaftMm: number): CbxTipSettings {
   return {
     length: Number.isFinite(tip.length) && tip.length > 0 ? tip.length : undefined,
     diameter: shaftMm,
-    pointDiameter: Number.isFinite(tip.contactDiameter) ? tip.contactDiameter : undefined,
+    pointDiameter: contactDiameterFor(tip, shaftMm),
   };
 }
 
@@ -90,7 +108,7 @@ export function buildTipFromKnot(
   // shaft). For a leaf, the cone spans the whole authored distance from the knot.
   // Body diameter follows the shaft (see synthTipSettings) in both cases.
   const tipSettingsForCone = asBranch
-    ? { length: nativeTipLen, diameter: shaftDiameter, pointDiameter: tip.contactDiameter }
+    ? { length: nativeTipLen, diameter: shaftDiameter, pointDiameter: contactDiameterFor(tip, shaftDiameter) }
     : synthTipSettings(tip, shaftDiameter);
 
   const assembly = createContactAssembly(
