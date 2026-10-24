@@ -376,9 +376,13 @@ export function collapseDegenerateJoints(input: JointCollapseInput): number {
         aboveSeg.bottomJoint = keeper;
       }
 
+      // Nothing to merge into: removing this segment would leave the shaft
+      // bodiless and its riders naming an id no shaft owns.
+      if (!belowSeg && !aboveSeg) continue;
+
       // Re-point any knots that rode this stub segment onto the merged segment.
       const ridingKnots = knotsBySegment.get(seg.id);
-      const mergeTargetSegId = belowSeg ? belowSeg.id : (aboveSeg ? aboveSeg.id : seg.id);
+      const mergeTargetSegId = belowSeg ? belowSeg.id : aboveSeg.id;
       if (ridingKnots && mergeTargetSegId !== seg.id) {
         for (const k of ridingKnots) {
           k.parentShaftId = mergeTargetSegId;
