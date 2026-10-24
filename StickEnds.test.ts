@@ -11,15 +11,18 @@ const tip = (over: Partial<CbxTip>): CbxTip => ({
     ...over,
 });
 
-/** An ungrounded shaft with a contact hanging below it: a stick. */
+/**
+ * An ungrounded shaft with a contact hanging below it: a stick. Thick enough
+ * to stay one -- a thin span builds as a twig instead.
+ */
 const stickModel = (tips: CbxTip[]): CbxModelInput => ({
     index: 0,
     filename: 'fixture',
     supports: [{
-        pillarDiameter: 0.3,
+        pillarDiameter: 1.2,
         pillarTopZ: 10, pillarBottomZ: 8,
         pillarX: 0, pillarY: 0,
-        knotCenterZ: 10, knotDiameter: 0.4,
+        knotCenterZ: 10, knotDiameter: 1.3,
         base: null,
         tips,
         downwardTip: tip({ contactZ: 6, attachZ: 8, x: 0.5, y: 0 }),

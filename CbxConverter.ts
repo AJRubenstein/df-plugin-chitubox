@@ -39,6 +39,7 @@ import {
   CBX_BRACE_ATTACH_TOL_MM,
   CbxSupport,
   CbxModelInput,
+  CbxTwig,
 } from './converter/types';
 export type {
   CbxTip,
@@ -93,6 +94,8 @@ interface BuiltSupport {
  */
 const JOINT_TAPER = 1.1; // twig joint = 1.1x its disk contact diameter
 const JOINT_CLEARANCE_MM = 0.05;
+/** Shaft at or below which a two-contact support builds as a twig, not a stick. */
+const TWIG_MAX_SHAFT_MM = 0.4;
 
 function buildStick(
   s: CbxSupport,
@@ -507,6 +510,10 @@ export class CbxConverter {
     const knots: Knot[] = [];
     const branches: Branch[] = [];
     const sticks: Stick[] = [];
+    // A thin support spanning two contacts is a twig, not a stick: a stick
+    // sizes its joints off the shaft, which on a shaft this thin leaves them
+    // standing proud, while a twig tapers as one body between its two disks.
+    const thinSpanTwigs: CbxTwig[] = [];
     const leaves: Leaf[] = [];
     // Leaves built on an authored FAN hub -- a stick's top knot or a junction
     // knot. Both are authored at their final position, so the leaf sanity pass
@@ -572,6 +579,17 @@ export class CbxConverter {
         // A downward contact means the support spans two parts of the model
         // rather than standing on the plate, which DragonFruit models as a
         // Stick. Remaining upward tips fan off the hub knot as leaves.
+        if (s.downwardTip && s.tips.length === 1 && s.pillarDiameter <= TWIG_MAX_SHAFT_MM) {
+          const down = s.downwardTip;
+          const up = s.tips[0];
+          thinSpanTwigs.push({
+            ax: down.x, ay: down.y, az: down.contactZ,
+            bx: up.x, by: up.y, bz: up.contactZ,
+            diameter: s.pillarDiameter,
+          });
+          continue;
+        }
+
         if (s.downwardTip && s.tips.length > 0) {
           const stick = buildStick(s, placeholderModelId, raftZ, tipDefaults, mesh);
           if (stick) {
@@ -1079,7 +1097,7 @@ export class CbxConverter {
     // --- Twigs (sub-12): short struts bridging two model contacts. ---
     // Built to match the host's buildTwig: disks oriented by real surface
     // normals from the mesh, joints standing off the surface along them.
-    const modelTwigs = model.twigs ?? [];
+    const modelTwigs = [...(model.twigs ?? []), ...thinSpanTwigs];
     const twigs: Twig[] = [];
 
     // Surface normal at a contact, oriented out of the solid. Probes in many
