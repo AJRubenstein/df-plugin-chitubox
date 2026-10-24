@@ -598,6 +598,18 @@ export class CbxConverter {
             branches.push(...stick.branches);
             leaves.push(...stick.leaves);
             for (const l of stick.leaves) stickHubLeafIds.add(l.id);
+
+            // A stick's shaft hosts braces like any other, so it joins the
+            // candidates a brace endpoint binds to.
+            const stickSegRefs: SegRef[] = [];
+            for (const seg of stick.stick.segments) {
+              const start = seg.bottomJoint?.pos;
+              const end = seg.topJoint?.pos;
+              if (start && end) stickSegRefs.push({ segmentId: seg.id, start, end });
+            }
+            if (stickSegRefs.length > 0) {
+              shaftRefs.push({ px: s.pillarX, py: s.pillarY, segments: stickSegRefs });
+            }
             continue;
           }
         }
