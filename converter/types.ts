@@ -88,9 +88,10 @@ export const CBX_SHAFT_DEFAULTS = {
 };
 
 // Max XY distance (mm) from a brace endpoint to a pillar shaft for attachment.
-// Brace endpoints sit on pillar centres (verified within ~0.5mm); 1.0mm gives a
-// small safety margin without risking a wrong-shaft match in dense layouts.
-export const CBX_BRACE_ATTACH_TOL_MM = 1.0;
+// Most endpoints sit on a pillar centre, but a minority land 2-3mm out and
+// found no host at all. Widening past 2.0 recovers almost nothing more, and
+// the braces it does recover keep the same length distribution.
+export const CBX_BRACE_ATTACH_TOL_MM = 2.0;
 
 /**
  * A single contact branch (tip) of a support. A support may have several
