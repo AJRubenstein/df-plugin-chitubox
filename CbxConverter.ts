@@ -15,6 +15,7 @@ import {
   Stump,
   ContactDisk,
 } from '@/supports/types';
+import type { ContactCone } from '@/supports/SupportPrimitives/ContactCone/types';
 import { SupportSettings } from '@/supports/Settings';
 import { getJointDiameter } from '@/supports/constants';
 import { calculateDiskThickness } from '@/supports/SupportPrimitives/ContactDisk/contactDiskUtils';
@@ -64,6 +65,7 @@ export { computeRaftZ, computeModelLift } from './converter/clusterTransform';
 // Geometry helpers extracted to converter/geometryHelpers.
 import {
   normalizeVec,
+  surfaceContact,
   synthSupportForTip,
   synthTipSettings,
   buildTipFromKnot,
@@ -99,6 +101,35 @@ const JOINT_CLEARANCE_MM = 0.05;
 const TWIG_MAX_SHAFT_MM = 0.4;
 /** Tip height at or below which a shaftless support builds as a stump. */
 const STUMP_MAX_TIP_HEIGHT_MM = 5.0;
+/** Gap left between a stump's root top and the joint standing on it. */
+const STUMP_ROOT_CLEARANCE_MM = 0.1;
+/** Shortest root a stump keeps. */
+const STUMP_MIN_ROOT_HEIGHT_MM = 0.3;
+
+/** Share of a short shaft a settings-sized root may occupy. */
+const ROOT_MAX_SHAFT_FRACTION = 0.5;
+
+/** Root height for a stump: plate to just under its joint, at least the minimum. */
+function stumpRootHeight(plateZ: number, jointZ: number): number {
+  const headroom = jointZ - plateZ - STUMP_ROOT_CLEARANCE_MM;
+  if (!Number.isFinite(headroom)) return STUMP_MIN_ROOT_HEIGHT_MM;
+  return Math.max(STUMP_MIN_ROOT_HEIGHT_MM, headroom);
+}
+
+/**
+ * Seat a stump's joint on its root top and stretch the cone down to meet it.
+ *
+ * Only the cone's length changes, so the contact stays where the file put it.
+ */
+function seatStumpOnRoot(joint: Joint, cone: ContactCone, rootTopZ: number): void {
+  const socketZ = rootTopZ + STUMP_ROOT_CLEARANCE_MM;
+  if (!Number.isFinite(socketZ) || socketZ <= joint.pos.z) return;
+  joint.pos.z = socketZ;
+  const dz = cone.normal.z;
+  if (!(Math.abs(dz) > 1e-6)) return;
+  const length = (socketZ - cone.pos.z) / dz;
+  if (Number.isFinite(length) && length > 0) cone.profile.lengthMm = length;
+}
 
 function buildStick(
   s: CbxSupport,
@@ -126,9 +157,9 @@ function buildStick(
   const hubBottom: Vec3 = { x: s.pillarX, y: s.pillarY, z: z(s.pillarBottomZ) };
 
   // A = the authored model contact, at the BOTTOM.
-  const contactA = new THREE.Vector3(down.x, down.y, z(down.contactZ));
+  const contactA = surfaceContact(down, new THREE.Vector3(down.x, down.y, z(down.contactZ)));
   // B = the stick's upper end, its own model contact.
-  const contactB = new THREE.Vector3(endTip.x, endTip.y, z(endTip.contactZ));
+  const contactB = surfaceContact(endTip, new THREE.Vector3(endTip.x, endTip.y, z(endTip.contactZ)));
 
   // The record gives the downward cone's axis exactly: socket on the pillar
   // bottom, contact 26.8 degrees off vertical from there. Feed that as the
@@ -140,7 +171,7 @@ function buildStick(
   ).normalize();
 
   const assemblyA = createContactAssembly(
-    { ...synthSupportForTip(down, hubBottom), tipNormal: { x: downAxis.x, y: downAxis.y, z: downAxis.z } },
+    { ...synthSupportForTip(down, hubBottom, contactA), tipNormal: { x: downAxis.x, y: downAxis.y, z: downAxis.z } },
     contactA,
     { x: contactB.x, y: contactB.y, z: contactB.z },
     synthTipSettings(down, shaftDiameter), tipDefaults, mesh,
@@ -155,7 +186,7 @@ function buildStick(
     z(endTip.attachZ) - z(endTip.contactZ),
   ).normalize();
   const assemblyB = createContactAssembly(
-    { ...synthSupportForTip(endTip, hubTop), tipNormal: { x: upAxis.x, y: upAxis.y, z: upAxis.z } },
+    { ...synthSupportForTip(endTip, hubTop, contactB), tipNormal: { x: upAxis.x, y: upAxis.y, z: upAxis.z } },
     contactB,
     { x: contactA.x, y: contactA.y, z: contactA.z },
     synthTipSettings(endTip, shaftDiameter), tipDefaults, mesh,
@@ -283,13 +314,20 @@ function buildSupport(
       coneHeight: Math.max(0, padTop - padBottom),
     };
   } else {
+    // The settings root is sized for a full-height support, so on a short shaft
+    // it would stand taller than the shaft itself.
+    const shaftRise = z(s.pillarTopZ) - pillarBottom;
+    const budget = Number.isFinite(shaftRise) && shaftRise > 0
+      ? shaftRise * ROOT_MAX_SHAFT_FRACTION
+      : Infinity;
+    const diskHeight = Math.min(rootDefaults.diskHeightMm, budget);
     root = {
       id: rootId,
       modelId,
       transform: { pos: { x: px, y: py, z: pillarBottom }, rot: { x: 0, y: 0, z: 0, w: 1 } },
       diameter: rootDefaults.diameterMm,
-      diskHeight: rootDefaults.diskHeightMm,
-      coneHeight: rootDefaults.coneHeightMm,
+      diskHeight,
+      coneHeight: Math.max(0, Math.min(rootDefaults.coneHeightMm, budget - diskHeight)),
     };
   }
 
@@ -344,9 +382,13 @@ function buildSupport(
   // recognises it as a properly-formed support.
   const provisionalKneeZ = Math.max(rootTopZ + 0.05, knotCenter);
   const provisionalKnee: Vec3 = { x: px, y: py, z: provisionalKneeZ };
-  const primary = createContactAssembly(
-    synthSupportForTip(primaryTip, provisionalKnee),
+  const primaryContact = surfaceContact(
+    primaryTip,
     new THREE.Vector3(primaryTip.x, primaryTip.y, z(primaryTip.contactZ)),
+  );
+  const primary = createContactAssembly(
+    synthSupportForTip(primaryTip, provisionalKnee, primaryContact),
+    primaryContact,
     provisionalKnee,
     synthTipSettings(primaryTip, shaftDiameter),
     tipDefaults,
@@ -356,9 +398,12 @@ function buildSupport(
 
   const socketZ = primary.socketJoint.pos.z;
   const segments: Segment[] = [];
-  if (socketZ - rootTopZ > MIN_BASE_SEG_MM + MIN_TRANSITION_SEG_MM) {
-    const minJointZ = rootTopZ + MIN_BASE_SEG_MM;
-    const maxJointZ = socketZ - MIN_TRANSITION_SEG_MM;
+  const minJointZ = rootTopZ + MIN_BASE_SEG_MM;
+  const maxJointZ = socketZ - MIN_TRANSITION_SEG_MM;
+  // A knotCenter at or above the socket clamps to the ceiling, leaving a stub
+  // shorter than the joints capping it, so the shaft stays whole instead.
+  const kneeEarnsItsSplit = knotCenter < maxJointZ;
+  if (socketZ - rootTopZ > MIN_BASE_SEG_MM + MIN_TRANSITION_SEG_MM && kneeEarnsItsSplit) {
     const jointZ = Math.max(minJointZ, Math.min(knotCenter, maxJointZ));
     const joint0: Joint = {
       id: uuidv4(),
@@ -1401,27 +1446,38 @@ export class CbxConverter {
     const convertedRootIds = new Set<string>();
     {
       const rootById = new Map(roots.map((r) => [r.id, r]));
+      // A support's own root can start above the plate, on a foot cluster or a
+      // pad, so the plate is the lowest root in the block.
+      const plateZ = roots.length > 0
+        ? Math.min(...roots.map((r) => r.transform.pos.z))
+        : 0;
+      // A stump draws no shaft, so anything riding the trunk's segments would
+      // be left naming an id no shaft owns.
+      const ridden = new Set<string>();
+      for (const knot of knots) if (knot.parentShaftId) ridden.add(knot.parentShaftId);
+
       for (const trunk of trunks) {
         const cone = trunk.contactCone;
         const root = trunk.rootId ? rootById.get(trunk.rootId) : undefined;
         const topJoint = trunk.segments[trunk.segments.length - 1]?.topJoint;
         if (!cone || !root || !topJoint) { keptTrunks.push(trunk); continue; }
 
-        const plateZ = root.transform.pos.z;
-        const rootTopZ = plateZ + (root.diskHeight ?? 0) + (root.coneHeight ?? 0);
         const shortEnough = cone.pos.z - plateZ <= STUMP_MAX_TIP_HEIGHT_MM;
-        if (!shortEnough || topJoint.pos.z >= rootTopZ) { keptTrunks.push(trunk); continue; }
+        if (!shortEnough) { keptTrunks.push(trunk); continue; }
+        if (trunk.segments.some((seg) => ridden.has(seg.id))) { keptTrunks.push(trunk); continue; }
 
         convertedRootIds.add(root.id);
+        const rootHeight = stumpRootHeight(plateZ, topJoint.pos.z);
+        seatStumpOnRoot(topJoint, cone, plateZ + rootHeight);
         stumps.push({
           id: trunk.id,
           modelId: trunk.modelId,
-          // The authored root, kept rather than replaced by the native defaults.
-          rootPos: root.transform.pos,
+          rootPos: { x: topJoint.pos.x, y: topJoint.pos.y, z: plateZ },
           rootBaseDiameter: root.diameter,
           rootTopDiameter: trunk.baseDiameterMm ?? root.diameter,
-          rootHeight: (root.diskHeight ?? 0) + (root.coneHeight ?? 0),
+          rootHeight,
           joint: topJoint,
+          // The root reaches the joint and the cone sockets on it: no span left.
           segments: [],
           contactCone: cone,
         });
