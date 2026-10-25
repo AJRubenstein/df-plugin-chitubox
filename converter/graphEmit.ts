@@ -47,6 +47,9 @@ const VERTICAL_XY_TOL_MM = 0.05;
  */
 const VERTICAL_SLOPE_MAX = 0.2;
 
+/** How close to the plate a junction's feeder may land before it is its pillar. */
+const JUNCTION_GROUNDED_MM = 0.2;
+
 /** How close a tip's authored socket must sit to a pillar to attach to it. */
 const TIP_ATTACH_XY_TOL_MM = 0.4;
 const TIP_ATTACH_Z_TOL_MM = 0.6;
@@ -375,6 +378,24 @@ export function emitFromGraph(
         continue;
       }
       if (feederIdx >= 0) consumedFeeders.add(feederIdx);
+
+      // A feeder landing on the plate is this junction's own pillar, not a
+      // diagonal off another support, so the junction stands as a support.
+      if (parent.z - plateZ <= JUNCTION_GROUNDED_MM) {
+        supports.push({
+          pillarDiameter: diameter,
+          pillarTopZ: g.z,
+          pillarBottomZ: plateZ,
+          pillarX: g.x,
+          pillarY: g.y,
+          knotCenterZ: g.z,
+          knotDiameter: diameter,
+          base: null,
+          tips: g.tips.map(tipFromRecord),
+        });
+        continue;
+      }
+
       junctionBranches.push({
         junctionX: g.x, junctionY: g.y, junctionZ: g.z,
         parentX: parent.x, parentY: parent.y, parentZ: parent.z,
